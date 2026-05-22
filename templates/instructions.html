@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Instruções — Lorena Admin{% endblock %}
+
+{% block content %}
+<h1>Instruções dinâmicas</h1>
+
+<!-- Add form -->
+<div class="card">
+  <h2>Nova instrução</h2>
+  <form method="POST" action="{{ url_for('instruction_new') }}">
+    <div class="add-form">
+      <textarea name="instruction_text" placeholder="Ex: O consultório atende sábados até 12h em caráter especial. Informar pacientes." required></textarea>
+      <div class="form-group">
+        <label>Categoria</label>
+        <select name="category">
+          {% for cat in categories %}
+          <option value="{{ cat }}">{{ cat }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Prioridade (1–10)</label>
+        <input type="number" name="priority" value="5" min="1" max="10" style="width:80px;">
+      </div>
+      <button type="submit" class="btn btn-success" style="align-self:flex-end;">+ Adicionar</button>
+    </div>
+  </form>
+  <p style="margin-top:12px;font-size:12px;color:#6c757d;">
+    Categorias: GERAL (default), INICIAL (saudação), PRECO, PLANO, HORARIO, LOCALIZACAO, OUTROS.<br>
+    Prioridade mais alta = aparece primeiro no prompt da Lorena. Instruções ativas são injetadas no system prompt.
+  </p>
+</div>
+
+<!-- Table -->
+<div class="card">
+  <h2>{{ instructions | length }} instruções</h2>
+  {% if not instructions %}
+    <p style="color:#6c757d;">Nenhuma instrução cadastrada ainda.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Texto</th>
+          <th>Categoria</th>
+          <th>Prio</th>
+          <th>Criada por</th>
+          <th>Via</th>
+          <th>Data</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for inst in instructions %}
+        <tr {% if not inst.active %}class="toggle-inactive"{% endif %}>
+          <td><strong>#{{ inst.id }}</strong></td>
+          <td style="max-width:380px;word-break:break-word;">{{ inst.instruction_text }}</td>
+          <td><span class="cat-chip">{{ inst.category }}</span></td>
+          <td>
+            <span class="prio {% if inst.priority >= 8 %}top{% elif inst.priority >= 6 %}high{% endif %}">
+              {{ inst.priority }}
+            </span>
+          </td>
+          <td style="font-family:monospace;font-size:12px;">
+            {% if inst.created_by_phone %}+{{ inst.created_by_phone }}{% else %}—{% endif %}
+          </td>
+          <td>{{ inst.created_via or '—' }}</td>
+          <td style="white-space:nowrap;font-size:12px;">
+            {{ inst.created_at[:16].replace('T',' ') if inst.created_at else '—' }}
+          </td>
+          <td>
+            {% if inst.active %}
+              <span class="badge badge-success">ativa</span>
+            {% else %}
+              <span class="badge badge-muted">inativa</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if inst.active %}
+            <form method="POST" action="{{ url_for('instruction_deactivate', iid=inst.id) }}"
+                  onsubmit="return confirm('Desativar instrução #{{ inst.id }}?')">
+              <button type="submit" class="btn btn-danger btn-sm">Desativar</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

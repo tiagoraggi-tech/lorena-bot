@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Agendamentos — Lorena Admin{% endblock %}
+
+{% block content %}
+<h1>Log de agendamentos <small style="font-size:14px;color:#6c757d;">(últimos 100)</small></h1>
+
+<div class="card">
+  {% if not appointments %}
+    <p style="color:#6c757d;">Nenhum agendamento registrado ainda.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Paciente</th>
+          <th>Telefone</th>
+          <th>Data solicitada</th>
+          <th>Horário confirmado</th>
+          <th>ID consultorio.me</th>
+          <th>Status</th>
+          <th>Erro</th>
+          <th>Criado em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for appt in appointments %}
+        <tr>
+          <td>#{{ appt.id }}</td>
+          <td>{{ appt.patient_name or '—' }}</td>
+          <td style="font-family:monospace;font-size:12px;">
+            {% if appt.patient_phone %}+{{ appt.patient_phone }}{% else %}—{% endif %}
+          </td>
+          <td>{{ appt.requested_date or '—' }}</td>
+          <td>{{ appt.confirmed_slot or '—' }}</td>
+          <td style="font-family:monospace;font-size:12px;">{{ appt.consultorio_id or '—' }}</td>
+          <td>
+            {% if appt.success %}
+              <span class="badge badge-success">✓ ok</span>
+            {% elif appt.cancelled %}
+              <span class="badge badge-warning">cancelado</span>
+            {% else %}
+              <span class="badge badge-danger">falhou</span>
+            {% endif %}
+          </td>
+          <td style="max-width:200px;word-break:break-word;font-size:12px;color:#842029;">
+            {{ appt.error_message or '' }}
+          </td>
+          <td style="white-space:nowrap;font-size:12px;">
+            {{ appt.created_at[:16].replace('T',' ') if appt.created_at else '—' }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

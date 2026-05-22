@@ -1,0 +1,229 @@
+"""
+lorena_instructions.py — Sistema de instruções dinâmicas + controle do bot
+Comandos via WhatsApp (do número pessoal da Jaqueline):
+  /parar, /ativar, /status, /instrucao [texto], /instrucoes, /instrucao_off N, /help
+"""
+import os
+import re
+import sqlite3
+import logging
+from datetime import datetime
+from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+log = logging.getLogger("lorena.instructions")
+DB_PATH = os.getenv("DB_PATH", "/data/lorena.db")
+JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "552499025732")
+VALID_CATEGORIES = ["GERAL", "INICIAL", "PRECO", "PLANO", "HORARIO", "LOCALIZACAO", "OUTROS"]
+
+
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ===== Bot status =====
+
+def is_bot_active() -> bool:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT is_active FROM bot_status WHERE id=1")
+    row = cur.fetchone()
+    conn.close()
+    return bool(row and row["is_active"])
+
+
+def set_bot_status(active: bool, by_phone: str, reason: str = "") -> None:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE bot_status
+        SET is_active=?, last_changed_at=?, changed_by_phone=?, reason=?
+        WHERE id=1
+    """, (1 if active else 0, datetime.utcnow().isoformat(), by_phone, reason[:200]))
+    conn.commit()
+    conn.close()
+    log.info("Bot %s por %s. Reason: %s", "ATIVADO" if active else "PARADO", by_phone, reason)
+
+
+def get_bot_status() -> dict:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM bot_status WHERE id=1")
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else {"is_active": True}
+
+
+# ===== Instruções =====
+
+def add_instruction(text: str, category: str = "GERAL", priority: int = 5,
+                    created_by_phone: str = "", created_via: str = "whatsapp") -> int:
+    if len(text) < 5:
+        raise ValueError("Instrução muito curta")
+    if len(text) > 1000:
+        raise ValueError("Instrução muito longa (max 1000)")
+    if category not in VALID_CATEGORIES:
+        category = "GERAL"
+    if not (1 <= priority <= 10):
+        priority = 5
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO lorena_instructions
+            (instruction_text, category, priority, created_by_phone, created_via)
+        VALUES (?, ?, ?, ?, ?)
+    """, (text.strip(), category, priority, created_by_phone, created_via))
+    iid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    log.info("Instrução #%d criada por %s: %s", iid, created_by_phone, text[:50])
+    return iid
+
+
+def list_active_instructions(category: Optional[str] = None) -> list[dict]:
+    conn = _conn()
+    cur = conn.cursor()
+    if category:
+        cur.execute("""
+            SELECT * FROM lorena_instructions
+            WHERE active=1 AND category=?
+            ORDER BY priority DESC, created_at DESC
+        """, (category,))
+    else:
+        cur.execute("""
+            SELECT * FROM lorena_instructions
+            WHERE active=1
+            ORDER BY priority DESC, created_at DESC
+        """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def deactivate_instruction(instruction_id: int, by_phone: str) -> bool:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE lorena_instructions
+        SET active=0, deactivated_at=?, deactivated_by_phone=?
+        WHERE id=? AND active=1
+    """, (datetime.utcnow().isoformat(), by_phone, instruction_id))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+# ===== Parser de comandos =====
+
+def parse_command(text: str) -> dict:
+    text = text.strip()
+    text_lower = text.lower()
+
+    if text_lower in ("/parar", "/pare"):
+        return {"action": "PARAR"}
+    if text_lower in ("/ativar", "/ativa", "/iniciar"):
+        return {"action": "ATIVAR"}
+    if text_lower in ("/status", "/estado"):
+        return {"action": "STATUS"}
+    if text_lower in ("/instrucoes", "/instruções", "/lista"):
+        return {"action": "LIST"}
+    if text_lower in ("/help", "/ajuda"):
+        return {"action": "HELP"}
+
+    m = re.match(r"^/instru[cç][aã]o_off\s+(\d+)\s*$", text_lower)
+    if m:
+        return {"action": "DEACTIVATE", "instruction_id": int(m.group(1))}
+
+    m = re.match(r"^/instru[cç][aã]o\s+(.+)$", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        body = m.group(1).strip()
+        category = "GERAL"
+        priority = 5
+        cat_m = re.match(r"^categoria=(\w+)\s+(.+)$", body, re.IGNORECASE | re.DOTALL)
+        if cat_m:
+            cat_candidate = cat_m.group(1).upper()
+            if cat_candidate in VALID_CATEGORIES:
+                category = cat_candidate
+                body = cat_m.group(2).strip()
+        prio_m = re.match(r"^priority=(\d+)\s+(.+)$", body, re.IGNORECASE | re.DOTALL)
+        if prio_m:
+            priority = int(prio_m.group(1))
+            body = prio_m.group(2).strip()
+        if not body or len(body) < 5:
+            return {"action": "INVALID", "error": "Instrução muito curta (mínimo 5 chars)"}
+        return {"action": "ADD", "instruction_text": body, "category": category, "priority": priority}
+
+    return {"action": "INVALID", "error": "Comando não reconhecido"}
+
+
+def handle_command(text: str, from_phone: str) -> str:
+    if from_phone != JAQUELINE_PHONE:
+        return "⛔ Você não tem permissão pra executar comandos administrativos."
+
+    parsed = parse_command(text)
+    action = parsed.get("action")
+
+    if action == "PARAR":
+        set_bot_status(False, from_phone, reason="Parado por Jaqueline via WhatsApp")
+        return ("🛑 *Bot Lorena PARADO.*\n\n"
+                "Você assumiu o atendimento manual.\n"
+                "Mensagens dos pacientes não serão respondidas pelo bot até /ativar.")
+    if action == "ATIVAR":
+        set_bot_status(True, from_phone, reason="Ativado por Jaqueline")
+        return ("✅ *Bot Lorena ATIVADO.*\n\n"
+                "Voltei a responder mensagens dos pacientes automaticamente.")
+    if action == "STATUS":
+        status = get_bot_status()
+        active = "✅ ATIVO" if status["is_active"] else "🛑 PARADO"
+        return (f"📊 *Status do Bot Lorena*\n\n"
+                f"Estado: {active}\n"
+                f"Última alteração: {status.get('last_changed_at', '?')}\n"
+                f"Motivo: {status.get('reason', '—')}")
+    if action == "ADD":
+        try:
+            iid = add_instruction(parsed["instruction_text"], parsed["category"],
+                                  parsed["priority"], from_phone, "whatsapp")
+            return (f"✅ *Instrução #{iid} adicionada*\n\n"
+                    f"📁 Categoria: {parsed['category']}\n"
+                    f"⭐ Prioridade: {parsed['priority']}/10\n\n"
+                    f"_Para desativar: /instrucao_off {iid}_")
+        except Exception as e:
+            return f"❌ Erro: {e}"
+    if action == "LIST":
+        instructions = list_active_instructions()
+        if not instructions:
+            return "📋 Nenhuma instrução ativa no momento."
+        lines = [f"📋 *{len(instructions)} instruções ativas:*\n"]
+        for inst in instructions:
+            preview = inst["instruction_text"][:80]
+            if len(inst["instruction_text"]) > 80:
+                preview += "..."
+            lines.append(f"*#{inst['id']}* [{inst['category']}, prio {inst['priority']}]: {preview}")
+        lines.append("\n_Use /instrucao_off N pra desativar_")
+        return "\n".join(lines)
+    if action == "DEACTIVATE":
+        iid = parsed["instruction_id"]
+        ok = deactivate_instruction(iid, from_phone)
+        return (f"✅ Instrução #{iid} desativada." if ok
+                else f"⚠️ Instrução #{iid} não encontrada ou já desativada.")
+    if action == "HELP":
+        return (
+            "*Comandos disponíveis (Jaqueline):*\n\n"
+            "🤖 *Controle do bot:*\n"
+            "• `/parar` — pausa bot\n"
+            "• `/ativar` — reativa bot\n"
+            "• `/status` — vê estado atual\n\n"
+            "📋 *Instruções dinâmicas:*\n"
+            "• `/instrucao [texto]` — adiciona\n"
+            "• `/instrucao categoria=PRECO [texto]` — com categoria\n"
+            "• `/instrucao priority=8 [texto]` — com prioridade 1-10\n"
+            "• `/instrucoes` — lista ativas\n"
+            "• `/instrucao_off N` — desativa #N\n\n"
+            "Categorias: GERAL, INICIAL, PRECO, PLANO, HORARIO, LOCALIZACAO, OUTROS\n\n"
+            "_Comandos case-insensitive._"
+        )
+    return f"❌ {parsed.get('error', 'Comando desconhecido')}.\nUse /help pra ver lista."

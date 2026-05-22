@@ -1,0 +1,422 @@
+"""
+lorena_webhook.py — Webhook principal da Lorena
+Recebe mensagens via Evolution API, classifica, processa, responde.
+"""
+import os
+import json
+import hashlib
+import logging
+import sqlite3
+import requests
+from datetime import datetime, timedelta
+from pathlib import Path
+from flask import Flask, request, jsonify
+try:
+    from pyngrok import ngrok, conf
+    _PYNGROK = True
+except ImportError:
+    _PYNGROK = False
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+
+from lorena_state import (
+    hash_phone, get_or_create_session, update_session, add_to_history,
+    get_session_by_hash, is_session_paused, pause_session,
+)
+from lorena_classifier import LorenaClassifier
+from lorena_instructions import is_bot_active, handle_command, list_active_instructions
+from lorena_prompt import build_system_prompt
+from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+log = logging.getLogger("lorena.webhook")
+app = Flask(__name__)
+
+# ===== Config =====
+LORENA_PHONE = os.getenv("LORENA_PHONE", "5524988370406")
+JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "552499025732")
+TIAGO_PHONE = os.getenv("TIAGO_PHONE", "5521999249903")
+PRESCRIPTION_BOT_PHONE = os.getenv("PRESCRIPTION_BOT_PHONE", "5524936181108")
+EVOLUTION_URL = os.getenv("EVOLUTION_API_URL")
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE")
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
+DB_PATH = os.getenv("DB_PATH", "/data/lorena.db")
+AUDIT_LOG = os.getenv("AUDIT_LOG", "/data/lorena_audit.jsonl")
+Path(AUDIT_LOG).parent.mkdir(parents=True, exist_ok=True)
+
+_chat = None
+_classifier = None
+
+def _get_chat():
+    global _chat
+    if _chat is None:
+        _chat = ChatGroq(
+            api_key=os.getenv("GROQ_API_KEY"),
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            temperature=0.3,
+        )
+    return _chat
+
+def _get_classifier():
+    global _classifier
+    if _classifier is None:
+        _classifier = LorenaClassifier()
+    return _classifier
+
+
+# ===== Helpers =====
+
+def audit(entry: dict):
+    try:
+        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("Audit log falhou: %s", e)
+
+
+def send_whatsapp_tracked(phone: str, text: str) -> bool:
+    url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+    headers = {"Content-Type": "application/json", "apikey": EVOLUTION_API_KEY}
+    ok = False
+    try:
+        r = requests.post(url, headers=headers, json={"number": phone, "text": text}, timeout=15)
+        r.raise_for_status()
+        ok = True
+    except Exception as e:
+        log.error("Send failed to %s: %s", phone[-4:], e)
+    if ok:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            text_hash = hashlib.sha256(text.encode()).hexdigest()
+            cur.execute("""
+                INSERT INTO bot_sent_messages (recipient_phone, message_text_hash, message_preview, source)
+                VALUES (?, ?, ?, 'BOT_API')
+            """, (phone, text_hash, text[:100]))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.warning("Tracking falhou: %s", e)
+    return ok
+
+
+def is_message_from_bot(recipient_phone: str, message_text: str) -> bool:
+    if not message_text:
+        return True
+    text_hash = hashlib.sha256(message_text.encode()).hexdigest()
+    threshold = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id FROM bot_sent_messages
+        WHERE recipient_phone=? AND message_text_hash=? AND sent_at > ?
+        LIMIT 1
+    """, (recipient_phone, text_hash, threshold))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+# ===== Webhook principal =====
+
+@app.route("/webhook/messages-upsert", methods=["POST"])
+def messages_upsert():
+    try:
+        data = request.get_json(force=True)
+        msg_data = data.get("data", {})
+        key = msg_data.get("key", {})
+        phone = key.get("remoteJid", "").replace("@s.whatsapp.net", "")
+        if not phone:
+            return jsonify({"status": "no_phone"}), 200
+
+        msg = msg_data.get("message", {})
+        text = (msg.get("conversation") or
+                msg.get("extendedTextMessage", {}).get("text") or "").strip()
+
+        # Detecção de intervenção manual (Jaqueline logada no WhatsApp Web)
+        if key.get("fromMe"):
+            if is_message_from_bot(phone, text):
+                return jsonify({"status": "ignored_self_api"}), 200
+            ph = hash_phone(phone)
+            pause_session(ph, minutes=30)
+            audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_intervention",
+                   "patient_last4": phone[-4:], "preview": text[:80]})
+            log.info("Jaqueline interveio em *%s — sessão pausada 30min", phone[-4:])
+            return jsonify({"status": "intervention_logged"}), 200
+
+        # Comandos admin da Jaqueline
+        if phone == JAQUELINE_PHONE:
+            response = handle_command(text, phone)
+            send_whatsapp_tracked(phone, response)
+            audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_command", "command": text[:100]})
+            return jsonify({"status": "command_processed"}), 200
+
+        # Mensagem do Dr. Tiago
+        if phone == TIAGO_PHONE:
+            send_whatsapp_tracked(phone,
+                "Olá Dr. Tiago! Este é o bot Lorena (agendamento).\n"
+                "Pra comandos administrativos, use o número da Jaqueline.\n"
+                f"Pra dúvidas clínicas dos pacientes, use o Uriel ({PRESCRIPTION_BOT_PHONE}).")
+            return jsonify({"status": "tiago_redirect"}), 200
+
+        # Bot pausado?
+        if not is_bot_active():
+            log.info("Bot pausado — ignorando mensagem de *%s", phone[-4:])
+            return jsonify({"status": "bot_paused"}), 200
+
+        return handle_patient_message(phone, text)
+
+    except Exception as e:
+        log.exception("Webhook error: %s", e)
+        return jsonify({"status": "error", "detail": str(e)}), 500
+
+
+def handle_patient_message(phone: str, text: str):
+    ph = hash_phone(phone)
+    session = get_or_create_session(phone)
+
+    if is_session_paused(ph):
+        log.info("Sessão *%s pausada — ignorando", phone[-4:])
+        return jsonify({"status": "session_paused"}), 200
+    if not text:
+        return jsonify({"status": "no_text"}), 200
+
+    add_to_history(ph, "user", text)
+    intent_result = _get_classifier().classify(text, session.get("current_state", "NEW"))
+    intent = intent_result["intent"]
+
+    log.info("*%s [%s] → %s (%s/%s)", phone[-4:], session.get("current_state"),
+             intent, intent_result["confidence"], intent_result["source"])
+    audit({"ts": datetime.utcnow().isoformat(), "event": "patient_message",
+           "patient_last4": phone[-4:], "state": session.get("current_state"),
+           "intent": intent, "confidence": intent_result["confidence"],
+           "source": intent_result["source"], "preview": text[:80]})
+
+    if intent == "DUVIDA_CLINICA":
+        return redirect_to_prescription_bot(phone, ph, text)
+    if intent == "FALAR_HUMANO":
+        return handoff_to_jaqueline(phone, ph, "patient_request",
+                                    subject="solicitação ao atendimento humano")
+    if intent == "AGRADECIMENTO":
+        send_whatsapp_tracked(phone, "😊 Foi um prazer ajudar! Qualquer coisa, estou por aqui.")
+        return jsonify({"status": "small_talk"}), 200
+
+    return process_with_llm(phone, ph, text, session)
+
+
+def process_with_llm(phone: str, ph: str, text: str, session: dict):
+    history = session.get("conversation_history", []) or []
+    messages = [SystemMessage(content=build_system_prompt())]
+    for item in history[-8:]:
+        role = item.get("role")
+        content = item.get("content", "")
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        else:
+            messages.append(AIMessage(content=content))
+    try:
+        response = _get_chat().invoke(messages)
+        raw = response.content
+    except Exception as e:
+        log.error("LLM falhou: %s", e)
+        send_whatsapp_tracked(phone, "Desculpe, tive um problema técnico. Pode repetir em alguns segundos?")
+        return jsonify({"status": "llm_error"}), 200
+    return process_llm_response(phone, ph, raw, session)
+
+
+def process_llm_response(phone: str, ph: str, raw: str, session: dict):
+    text = raw.strip()
+
+    if "AGENDAR:" in text:
+        try:
+            payload = json.loads(text.split("AGENDAR:", 1)[1].strip())
+        except Exception:
+            send_whatsapp_tracked(phone, "Desculpe, houve um erro. Pode repetir as informações?")
+            return jsonify({"status": "agendar_parse_error"}), 200
+        return handle_appointment_request(phone, ph, payload)
+
+    if "PROXIMO_SLOT" in text:
+        return offer_next_slot(phone, ph)
+
+    if "CANCELAR:" in text:
+        try:
+            payload = json.loads(text.split("CANCELAR:", 1)[1].strip())
+            return handle_cancel(phone, ph, payload.get("id"))
+        except Exception:
+            send_whatsapp_tracked(phone, "Não identifiquei o ID. Pode confirmar?")
+            return jsonify({"status": "cancel_parse_error"}), 200
+
+    if "FALAR_HUMANA:" in text:
+        try:
+            payload = json.loads(text.split("FALAR_HUMANA:", 1)[1].strip())
+            return handoff_to_jaqueline(phone, ph, "bot_failure",
+                                        patient_name=payload.get("nome"),
+                                        subject=payload.get("assunto"))
+        except Exception:
+            return handoff_to_jaqueline(phone, ph, "bot_failure")
+
+    send_whatsapp_tracked(phone, text)
+    add_to_history(ph, "assistant", text)
+    return jsonify({"status": "responded"}), 200
+
+
+def handle_appointment_request(phone: str, ph: str, payload: dict):
+    nome = payload.get("nome", "").strip()
+    telefone = payload.get("telefone", "").strip()
+    data = payload.get("data", "").strip()
+
+    try:
+        weekday = datetime.strptime(data, "%Y-%m-%d").weekday()
+        if weekday not in [0, 2]:  # seg=0, qua=2
+            send_whatsapp_tracked(phone,
+                f"A data {data} não é segunda ou quarta-feira.\n"
+                f"Atualmente atendemos apenas segundas e quartas à tarde.\n"
+                f"Pode escolher outra data?")
+            return jsonify({"status": "invalid_day"}), 200
+    except Exception:
+        send_whatsapp_tracked(phone,
+            "Não consegui interpretar a data. Pode informar no formato YYYY-MM-DD? Ex: 2026-05-26")
+        return jsonify({"status": "invalid_date_format"}), 200
+
+    if not is_api_configured():
+        send_whatsapp_tracked(phone,
+            f"Anotei seus dados, {nome}! 😊\n"
+            f"Vou pedir pra Jaqueline confirmar disponibilidade pra {data} e voltar pra você.")
+        return handoff_to_jaqueline(phone, ph, "bot_failure", patient_name=nome,
+                                    subject=f"Confirmar disponibilidade {data} pra {nome} ({telefone})")
+
+    slots = get_available_times(data)
+    if isinstance(slots, dict) and "error" in slots:
+        send_whatsapp_tracked(phone, f"Não consegui verificar horários pra {data}. Pode tentar outra data?")
+        return jsonify({"status": "api_error"}), 200
+    if not slots:
+        send_whatsapp_tracked(phone, f"Não há horários disponíveis em {data}. Gostaria de tentar outra data?")
+        return jsonify({"status": "no_slots"}), 200
+
+    update_session(ph, current_state="AWAITING_CONFIRMATION",
+                   collected_name=nome, collected_phone=telefone,
+                   collected_date=data, available_slots=slots, current_slot_index=0)
+    return offer_slot(phone, ph)
+
+
+def offer_slot(phone: str, ph: str):
+    session = get_session_by_hash(ph)
+    slots = session.get("available_slots") or []
+    idx = session.get("current_slot_index", 0)
+
+    if idx >= len(slots):
+        send_whatsapp_tracked(phone,
+            "Infelizmente esgotamos os horários disponíveis nesse dia.\n"
+            "Gostaria de tentar outro dia?")
+        update_session(ph, current_state="NEW", available_slots=None, current_slot_index=0)
+        return jsonify({"status": "slots_exhausted"}), 200
+
+    slot = slots[idx]
+    try:
+        dt = datetime.fromisoformat(slot["DateTime"])
+        time_str = dt.strftime("%H:%M")
+        date_str = dt.strftime("%d/%m/%Y")
+    except Exception:
+        time_str = slot.get("DateTime", "?")
+        date_str = ""
+
+    send_whatsapp_tracked(phone,
+        f"O próximo horário disponível é às *{time_str}* em {date_str}.\n"
+        f"Esse horário funciona pra você? (responda *sim* ou *não*)")
+    update_session(ph, current_state="AWAITING_CONFIRMATION")
+    return jsonify({"status": "slot_offered"}), 200
+
+
+def offer_next_slot(phone: str, ph: str):
+    session = get_session_by_hash(ph)
+    new_idx = (session.get("current_slot_index", 0) or 0) + 1
+    update_session(ph, current_slot_index=new_idx)
+    return offer_slot(phone, ph)
+
+
+def handle_cancel(phone: str, ph: str, appointment_id: str):
+    if not is_api_configured():
+        send_whatsapp_tracked(phone, "Pra cancelar, vou pedir pra Jaqueline cuidar do seu cancelamento.")
+        return handoff_to_jaqueline(phone, ph, "admin_route",
+                                    subject=f"Cancelar agendamento #{appointment_id}")
+    result = cancel_appointment(appointment_id)
+    if isinstance(result, dict) and "error" in result:
+        send_whatsapp_tracked(phone, f"Erro ao cancelar: {result['error']}")
+        return jsonify({"status": "cancel_error"}), 200
+    send_whatsapp_tracked(phone, "✅ Agendamento cancelado com sucesso.\nSe precisar reagendar, é só me avisar!")
+    update_session(ph, current_state="NEW")
+    return jsonify({"status": "cancelled"}), 200
+
+
+def redirect_to_prescription_bot(phone: str, ph: str, text: str):
+    send_whatsapp_tracked(phone,
+        f"Sobre sua dúvida, vou encaminhar você pro Uriel, assistente especializado do consultório:\n\n"
+        f"👉 wa.me/{PRESCRIPTION_BOT_PHONE}\n\n"
+        f"Aqui na Lorena cuido apenas de agendamentos. Qualquer hora que precisar marcar consulta, é só me chamar! 😊")
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO handoffs_to_jaqueline
+            (patient_phone_hash, patient_phone_last4, subject, triggered_by, redirected_to)
+        VALUES (?, ?, ?, 'clinical_doubt', 'prescription_bot')
+    """, (ph, phone[-4:], text[:200]))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "redirected_to_prescription"}), 200
+
+
+def handoff_to_jaqueline(phone: str, ph: str, triggered_by: str,
+                         patient_name: str = "", subject: str = ""):
+    send_whatsapp_tracked(phone,
+        "👤 Vou pedir pra nossa atendente Jaqueline te atender pessoalmente.\n"
+        "Ela vai responder aqui mesmo, nesta conversa, em alguns instantes.")
+    last4 = phone[-4:]
+    notify_msg = (f"👋 *Novo encaminhamento para atendimento humano*\n\n"
+                  f"👤 Nome: *{patient_name or 'não identificado'}*\n"
+                  f"📱 WhatsApp: *+{phone}*\n"
+                  f"🔗 wa.me/{phone}\n\n"
+                  f"📋 Motivo: {triggered_by}\n"
+                  f"💬 Assunto: {subject or '—'}\n\n"
+                  f"Responda pelo WhatsApp Web da Lorena ou entre em contato diretamente pelo link acima.")
+    send_whatsapp_tracked(JAQUELINE_PHONE, notify_msg)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO handoffs_to_jaqueline
+            (patient_phone_hash, patient_phone_last4, patient_name, subject, triggered_by, redirected_to)
+        VALUES (?, ?, ?, ?, ?, 'jaqueline_human')
+    """, (ph, last4, patient_name, subject, triggered_by))
+    conn.commit()
+    conn.close()
+    update_session(ph, current_state="HANDED_OFF")
+    return jsonify({"status": "handed_off"}), 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "bot_active": is_bot_active(),
+        "api_configured": is_api_configured(),
+        "ts": datetime.utcnow().isoformat()
+    })
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("WEBHOOK_PORT", 6001))
+    ngrok_token = os.getenv("NGROK_AUTHTOKEN")
+    if ngrok_token and _PYNGROK:
+        conf.get_default().auth_token = ngrok_token
+        public_url = ngrok.connect(port).public_url
+        log.info("=" * 70)
+        log.info("Webhook Lorena: %s/webhook/messages-upsert", public_url)
+        log.info("Configure essa URL no painel Evolution -> instancia 'lorena-bot'")
+        log.info("=" * 70)
+    log.info("Lorena Bot iniciando — porta %d", port)
+    log.info("Bot status: %s", "ATIVO" if is_bot_active() else "PARADO")
+    log.info("API consultorio.me: %s", "OK" if is_api_configured() else "NÃO CONFIGURADA")
+    log.info("Instruções ativas: %d", len(list_active_instructions()))
+    app.run(host="0.0.0.0", port=port, debug=False)

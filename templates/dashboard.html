@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Lorena Admin{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<!-- Bot Status Card -->
+<div class="card">
+  <h2 style="margin-bottom:14px;">Status do Bot</h2>
+  <div class="bot-status">
+    <span class="status-dot {% if bot_status.is_active %}active{% else %}paused{% endif %}"></span>
+    <span class="status-text">
+      {% if bot_status.is_active %}✅ BOT ATIVO{% else %}🛑 BOT PAUSADO{% endif %}
+    </span>
+    <span class="status-meta">
+      {% if bot_status.last_changed_at %}
+        Última alteração: {{ bot_status.last_changed_at[:16].replace('T',' ') }}
+        {% if bot_status.reason %} — {{ bot_status.reason }}{% endif %}
+      {% endif %}
+    </span>
+    <form class="toggle-form" method="POST" action="{{ url_for('bot_toggle') }}">
+      <div class="form-group">
+        <label>Motivo (opcional)</label>
+        <input type="text" name="reason"
+               placeholder="Ex: Jaqueline ausente, reunião, etc.">
+      </div>
+      {% if bot_status.is_active %}
+        <button type="submit" class="btn btn-danger">⏸ Pausar bot</button>
+      {% else %}
+        <button type="submit" class="btn btn-success">▶ Ativar bot</button>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="value">{{ active_instructions }}</div>
+    <div class="label">Instruções ativas</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ appointments_week }}</div>
+    <div class="label">Agendamentos (7 dias)</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ handoffs_week }}</div>
+    <div class="label">Encaminhamentos Jaqueline (7 dias)</div>
+  </div>
+</div>
+
+<!-- Quick links -->
+<div class="card">
+  <h2>Ações rápidas</h2>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="{{ url_for('instructions_view') }}" class="btn btn-primary">📋 Gerenciar Instruções</a>
+    <a href="{{ url_for('appointments_view') }}" class="btn btn-primary">📅 Ver Agendamentos</a>
+  </div>
+  <p style="margin-top:16px;color:#6c757d;font-size:13px;line-height:1.6;">
+    <strong>Comandos via WhatsApp (só Jaqueline):</strong><br>
+    <code>/parar</code> — pausa o bot &nbsp;|&nbsp;
+    <code>/ativar</code> — reativa &nbsp;|&nbsp;
+    <code>/status</code> — ver estado &nbsp;|&nbsp;
+    <code>/instrucao [texto]</code> — adiciona instrução &nbsp;|&nbsp;
+    <code>/instrucoes</code> — lista &nbsp;|&nbsp;
+    <code>/instrucao_off N</code> — desativa #N &nbsp;|&nbsp;
+    <code>/help</code> — ajuda
+  </p>
+</div>
+{% endblock %}
