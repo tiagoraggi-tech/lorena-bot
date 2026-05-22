@@ -4,11 +4,35 @@ Une lorena_webhook + lorena_admin em um único Flask app na porta $PORT.
 """
 import os
 import secrets
+import logging
 from datetime import timedelta
+from pathlib import Path
 from flask import Flask
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
+
+# ── Auto-inicializar banco na startup ──────────────────────────────
+def _ensure_db():
+    """Cria schema e seeds se o banco ainda não existir."""
+    db_path = os.getenv("DB_PATH", "/data/lorena.db")
+    db_file = Path(db_path)
+    try:
+        import db_init
+        if not db_file.exists():
+            log.info("Banco nao encontrado em %s — inicializando...", db_path)
+            db_init.init_db()
+            db_init.seed_default_instructions()
+            log.info("Banco inicializado com sucesso.")
+        else:
+            # Garante schema atualizado mesmo se o arquivo ja existe
+            db_init.init_db()
+    except Exception as exc:
+        log.error("Erro ao inicializar banco: %s", exc)
+
+_ensure_db()
 
 # ── App combinado ──────────────────────────────────────────────────
 app = Flask(__name__, template_folder="templates", static_folder="static")
