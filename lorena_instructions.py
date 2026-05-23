@@ -91,7 +91,7 @@ def add_instruction(text: str, category: str = "GERAL", priority: int = 5,
 
 def list_active_instructions(category: Optional[str] = None) -> list[dict]:
     conn = _conn()
-    cur = connrsor()
+    cur = conn.cursor()
     if category:
         cur.execute("""
             SELECT * FROM lorena_instructions
