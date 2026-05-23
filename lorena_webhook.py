@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
+from db_init import migrate_db
 from lorena_state import (
     hash_phone, get_or_create_session, update_session, add_to_history,
     get_session_by_hash, is_session_paused, pause_session,
@@ -30,6 +31,7 @@ from lorena_prompt import build_system_prompt
 from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured, find_next_available_slot
 
 load_dotenv()
+migrate_db()  # garante coluna collected_document no banco existente
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("lorena.webhook")
@@ -275,9 +277,11 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             payload = json.loads(text.split("BUSCAR_PROXIMO:", 1)[1].strip())
             nome = payload.get("nome", "").strip()
             telefone = payload.get("telefone", "").strip()
+            cpf = payload.get("cpf", "").strip()
         except Exception:
             nome = session.get("collected_name", "")
             telefone = session.get("collected_phone", "")
+            cpf = session.get("collected_document", "")
         send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
         result = find_next_available_slot()
         if isinstance(result, dict) and "slots" in result:
@@ -285,6 +289,7 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             next_slots = result["slots"]
             update_session(ph, current_state="AWAITING_CONFIRMATION",
                            collected_name=nome, collected_phone=telefone,
+                           collected_document=cpf,
                            collected_date=next_date, available_slots=next_slots, current_slot_index=0)
             return offer_slot(phone, ph)
         else:
@@ -303,6 +308,7 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
 def handle_appointment_request(phone: str, ph: str, payload: dict):
     nome = payload.get("nome", "").strip()
     telefone = payload.get("telefone", "").strip()
+    cpf = payload.get("cpf", "").strip()
     data = payload.get("data", "").strip()
 
     try:
@@ -340,6 +346,7 @@ def handle_appointment_request(phone: str, ph: str, payload: dict):
 
     update_session(ph, current_state="AWAITING_CONFIRMATION",
                    collected_name=nome, collected_phone=telefone,
+                   collected_document=cpf,
                    collected_date=data, available_slots=slots, current_slot_index=0)
     return offer_slot(phone, ph)
 
@@ -402,6 +409,7 @@ def handle_slot_confirmation(phone: str, ph: str):
     session = get_session_by_hash(ph)
     nome = session.get("collected_name", "")
     telefone = session.get("collected_phone", "")
+    cpf = session.get("collected_document", "")
     slots = session.get("available_slots") or []
     idx = session.get("current_slot_index", 0)
 
@@ -417,7 +425,7 @@ def handle_slot_confirmation(phone: str, ph: str):
         return handoff_to_jaqueline(phone, ph, "api_not_configured", patient_name=nome,
                                     subject=f"Confirmar agendamento {dt_raw} — {nome} ({telefone})")
 
-    result = create_appointment(nome, telefone, dt_raw, slot_id)
+    result = create_appointment(nome, telefone, dt_raw, slot_id, document=cpf)
     if isinstance(result, dict) and result.get("success"):
         try:
             dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))

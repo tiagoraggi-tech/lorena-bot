@@ -259,7 +259,8 @@ def find_next_available_slot(after_date: str = None, weeks_ahead: int = 8) -> di
 
 
 def create_appointment(name: str, phone: str, date_time: str,
-                       time_slot_id: str, birth_date: str = "") -> dict:
+                       time_slot_id: str, birth_date: str = "",
+                       document: str = "") -> dict:
     """
     Cria agendamento via POST /v1/api/appointment/create-appointment.
 
@@ -269,6 +270,7 @@ def create_appointment(name: str, phone: str, date_time: str,
         date_time: datetime ISO 8601 (ex: "2026-05-26T14:00:00Z")
         time_slot_id: ID do slot (TimeSlotId retornado pela API)
         birth_date: data de nascimento ISO 8601 (opcional)
+        document: CPF do paciente (obrigatório pela API)
 
     Returns:
         {"success": True, "appointment_id": "..."} ou {"error": "..."}
@@ -280,12 +282,16 @@ def create_appointment(name: str, phone: str, date_time: str,
     if date_time and "T" in date_time and not date_time.endswith("Z") and "+" not in date_time:
         date_time = date_time + "Z"
 
+    # Normaliza CPF: remove pontos e traços
+    doc_clean = "".join(c for c in document if c.isdigit()) if document else ""
+
     payload = {
         "ProId": PRO_ID,
         "Name": name,
         "Phone1": phone,
         "DateTime": date_time,
         "TimeSlotId": time_slot_id,
+        "Document": doc_clean,
     }
     if birth_date:
         if "T" not in birth_date:

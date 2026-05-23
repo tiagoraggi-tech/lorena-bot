@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS patient_sessions (
     collected_phone TEXT,
     collected_date TEXT,
     collected_birth_date TEXT,
+    collected_document TEXT,
     available_slots TEXT,
     current_slot_index INTEGER DEFAULT 0,
     conversation_history TEXT,
@@ -137,11 +138,28 @@ CREATE TABLE IF NOT EXISTS magic_links (
 """
 
 
+def migrate_db():
+    """Aplica migrações incrementais no banco existente."""
+    conn = sqlite3.connect(DB_PATH)
+    migrations = [
+        "ALTER TABLE patient_sessions ADD COLUMN collected_document TEXT",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+            conn.commit()
+            print(f"✅ Migration aplicada: {sql[:60]}")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+    conn.close()
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()
+    migrate_db()
     print(f"✅ Schema criado em {DB_PATH}")
 
 
