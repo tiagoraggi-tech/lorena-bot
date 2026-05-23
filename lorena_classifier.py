@@ -8,8 +8,7 @@ import re
 import json
 import logging
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
+from groq import Groq
 
 load_dotenv()
 log = logging.getLogger("lorena.classifier")
@@ -79,14 +78,34 @@ EXEMPLOS:
 """
 
 
+GROQ_MODELS = [
+    os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "llama-3.1-70b-versatile",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
+
+
 class LorenaClassifier:
     def __init__(self):
-        self.llm = ChatGroq(
-            api_key=os.getenv("GROQ_API_KEY"),
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0.1,
-            max_tokens=256,
-        )
+        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+    def _call_llm(self, messages: list) -> str:
+        last_err = None
+        for model in GROQ_MODELS:
+            try:
+                resp = self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=256,
+                )
+                return resp.choices[0].message.content
+            except Exception as e:
+                log.warning("Classifier modelo %s falhou: %s", model, e)
+                last_err = e
+        raise last_err
 
     def classify(self, message: str, current_state: str = "NEW") -> dict:
         msg = message.strip()
@@ -123,11 +142,11 @@ class LorenaClassifier:
                     "source": "keywords", "reasoning": "keyword administrativa"}
 
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=LLM_CLASSIFIER_PROMPT),
-                HumanMessage(content=msg),
+            content = self._call_llm([
+                {"role": "system", "content": LLM_CLASSIFIER_PROMPT},
+                {"role": "user", "content": msg},
             ])
-            raw = re.sub(r"```(?:json)?\n?|\n?```", "", response.content).strip()
+            raw = re.sub(r"```(?:json)?\n?|\n?```", "", content).strip()
             data = json.loads(raw)
             data["source"] = "llm"
             return data
