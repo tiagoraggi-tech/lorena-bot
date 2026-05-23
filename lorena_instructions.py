@@ -154,8 +154,12 @@ def parse_command(text: str) -> dict:
         return {"action": "STATUS"}
     if text_lower in ("/instrucoes", "/instruções", "/lista"):
         return {"action": "LIST"}
-    if text_lower in ("/help", "/ajuda"):
+    if text_lower in ("/help", "/ajuda", "ver comandos", "comandos"):
         return {"action": "HELP"}
+
+    m = re.match(r"^/resetar\s+(\d+)\s*$", text_lower)
+    if m:
+        return {"action": "RESETAR", "phone": m.group(1)}
 
     # /limpar_instrucoes — apaga da memória todas as instruções enviadas via WhatsApp
     if re.match(r"^/limpar[_\s]instru[cç][oõ]es$", text_lower):
@@ -254,21 +258,41 @@ def handle_command(text: str, from_phone: str) -> str:
         ok = deactivate_instruction(iid, from_phone)
         return (f"✅ Instrução #{iid} desativada." if ok
                 else f"⚠️ Instrução #{iid} não encontrada ou já desativada.")
+    if action == "RESETAR":
+        patient_phone = parsed["phone"]
+        try:
+            from lorena_state import hash_phone, update_session
+            ph = hash_phone(patient_phone)
+            update_session(ph, current_state="NEW", collected_name=None,
+                           collected_phone=None, collected_document=None,
+                           collected_date=None, available_slots=None,
+                           current_slot_index=0, conversation_history=None,
+                           paused_until=None)
+            return (f"✅ Sessão do paciente *+{patient_phone}* resetada.\n"
+                    f"O bot vai tratá-lo como novo paciente na próxima mensagem.")
+        except Exception as e:
+            return f"❌ Erro ao resetar sessão: {e}"
     if action == "HELP":
         return (
-            "*Comandos disponíveis (Jaqueline):*\n\n"
-            "🤖 *Controle do bot:*\n"
-            "• `/parar` — pausa bot\n"
-            "• `/ativar` — reativa bot\n"
-            "• `/status` — vê estado atual\n\n"
-            "📋 *Instruções dinâmicas:*\n"
-            "• `/instrucao [texto]` — salva orientação com prioridade máxima (10/10)\n"
-            "  → A mais recente sempre prevalece sobre as mais antigas\n"
-            "• `/instrucao categoria=PRECO [texto]` — com categoria específica\n"
+            "🤖 *Comandos da Lorena — Jaqueline*\n\n"
+            "──────────────────────\n"
+            "🔛 *Controle do bot*\n"
+            "• `/ativar` — liga o bot\n"
+            "• `/parar` — pausa o bot\n"
+            "• `/status` — vê se o bot está ligado\n\n"
+            "📝 *Instruções (memória do bot)*\n"
+            "• `/instrucao texto` — salva info no bot (ex: valor, planos, endereço)\n"
             "• `/instrucoes` — lista todas as instruções ativas\n"
-            "• `/instrucao_off N` — desativa instrução #N\n"
-            "• `/limpar_instrucoes` — apaga da memória todas as instruções enviadas via WhatsApp\n\n"
-            "Categorias: GERAL, INICIAL, PRECO, PLANO, HORARIO, LOCALIZACAO, OUTROS\n\n"
-            "_Comandos case-insensitive._"
+            "• `/instrucao_off N` — desativa a instrução de número N\n"
+            "• `/limpar_instrucoes` — apaga todas as instruções salvas\n\n"
+            "──────────────────────\n"
+            "💡 *Categorias opcionais:*\n"
+            "PRECO · PLANO · HORARIO · LOCALIZACAO · GERAL\n\n"
+            "Exemplo com categoria:\n"
+            "`/instrucao categoria=PRECO Consulta: R$ 250`\n\n"
+            "🔄 *Sessão de paciente*\n"
+            "• `/resetar 5524XXXXXXXX` — reseta sessão de um paciente\n\n"
+            "📋 *Ver lista de instruções ativas:* /instrucoes\n"
+            "❓ *Ver esta ajuda:* ver comandos"
         )
-    return f"❌ {parsed.get('error', 'Comando desconhecido')}.\nUse /help pra ver lista."
+    return f"❌ {parsed.get('error', 'Comando desconhecido')}.\nEnvie *ver comandos* pra ver a lista."

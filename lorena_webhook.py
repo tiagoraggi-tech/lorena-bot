@@ -218,7 +218,7 @@ def handle_patient_message(phone: str, text: str):
 def process_with_llm(phone: str, ph: str, text: str, session: dict):
     history = session.get("conversation_history", []) or []
     messages = [SystemMessage(content=build_system_prompt())]
-    for item in history[-8:]:
+    for item in history[-6:]:
         role = item.get("role")
         content = item.get("content", "")
         if role == "user":
