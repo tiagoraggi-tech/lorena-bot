@@ -282,6 +282,7 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             nome = session.get("collected_name", "")
             telefone = session.get("collected_phone", "")
             cpf = session.get("collected_document", "")
+        add_to_history(ph, "assistant", "Deixa eu verificar a próxima vaga disponível... 🔍")
         send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
         result = find_next_available_slot()
         if isinstance(result, dict) and "slots" in result:
@@ -368,11 +369,7 @@ def offer_slot(phone: str, ph: str):
             next_slots = result["slots"]
             update_session(ph, current_state="AWAITING_CONFIRMATION",
                            collected_date=next_date, available_slots=next_slots, current_slot_index=0)
-            send_whatsapp_tracked(phone,
-                f"Não há mais horários nesse dia. O próximo disponível é na *{next_weekday}*, "
-                f"*{next_date_br}*. 😊\n"
-                f"Posso te oferecer um horário nesse dia?")
-            return jsonify({"status": "next_day_offered"}), 200
+            return offer_slot(phone, ph)
         # API falhou ou sem vagas — encaminha pra Jaqueline
         send_whatsapp_tracked(phone,
             "Não encontrei vagas disponíveis nos próximos dias. "
@@ -397,9 +394,10 @@ def offer_slot(phone: str, ph: str):
         weekday = ""
 
     weekday_label = f"*{weekday}*, " if weekday else ""
-    send_whatsapp_tracked(phone,
-        f"O próximo horário disponível é {weekday_label}*{date_str}* às *{time_str}*. 😊\n"
-        f"Funciona pra você? (responda *sim* ou *não*)")
+    offer_msg = (f"O próximo horário disponível é {weekday_label}*{date_str}* às *{time_str}*. 😊\n"
+                 f"Funciona pra você? (responda *sim* ou *não*)")
+    send_whatsapp_tracked(phone, offer_msg)
+    add_to_history(ph, "assistant", offer_msg)
     update_session(ph, current_state="AWAITING_CONFIRMATION")
     return jsonify({"status": "slot_offered"}), 200
 
