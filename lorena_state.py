@@ -1,5 +1,5 @@
 """
-lorena_state.py — Gestão de estado por paciente (multi-sessão)
+lorena_state.py -- Gestao de estado por paciente (multi-sessao)
 """
 import os
 import json
@@ -44,7 +44,7 @@ def get_or_create_session(phone: str) -> dict:
     if row["last_message_at"]:
         last_msg = datetime.fromisoformat(row["last_message_at"])
         if (datetime.utcnow() - last_msg).total_seconds() > SESSION_TIMEOUT_HOURS * 3600:
-            log.info("Sessão expirada pra *%s, reset", last4)
+            log.info("Sessao expirada pra *%s, reset", last4)
             cur.execute("""
                 UPDATE patient_sessions
                 SET current_state='NEW', collected_name=NULL, collected_phone=NULL,
