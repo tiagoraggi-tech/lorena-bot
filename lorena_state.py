@@ -122,3 +122,22 @@ def pause_session(phone_hash: str, minutes: int = 30) -> None:
     paused_until = (datetime.utcnow() + timedelta(minutes=minutes)).isoformat()
     update_session(phone_hash, paused_until=paused_until)
     log.info("Sessão *%s pausada até %s", phone_hash[:8], paused_until)
+
+
+def resume_all_sessions() -> int:
+    """Remove o pause de todas as sessões e reseta HANDED_OFF → NEW.
+    Retorna o número de sessões reativadas."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE patient_sessions
+        SET paused_until = NULL,
+            current_state = CASE WHEN current_state = 'HANDED_OFF' THEN 'NEW' ELSE current_state END,
+            updated_at = ?
+        WHERE paused_until IS NOT NULL OR current_state = 'HANDED_OFF'
+    """, (datetime.utcnow().isoformat(),))
+    count = cur.rowcount
+    conn.commit()
+    conn.close()
+    log.info("resume_all_sessions: %d sessão(ões) reativada(s)", count)
+    return count

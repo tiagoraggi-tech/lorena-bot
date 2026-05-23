@@ -136,27 +136,33 @@ def messages_upsert():
         text = (msg.get("conversation") or
                 msg.get("extendedTextMessage", {}).get("text") or "").strip()
 
-        # Detecção de intervenção manual (Jaqueline logada no WhatsApp Web)
-        if key.get("fromMe"):
-            if is_message_from_bot(phone, text):
-                return jsonify({"status": "ignored_self_api"}), 200
-            ph = hash_phone(phone)
-            pause_session(ph, minutes=30)
-            audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_intervention",
-                   "patient_last4": phone[-4:], "preview": text[:80]})
-            log.info("Jaqueline interveio em *%s — sessão pausada 30min", phone[-4:])
-            return jsonify({"status": "intervention_logged"}), 200
+        # Normalizar phone: remover sufixos extras (grupos, broadcast etc)
+        phone = phone.split("@")[0] if "@" in phone else phone
+        phone = phone.replace("-", "").strip()
 
-        # Comandos admin da Jaqueline
-        if phone == JAQUELINE_PHONE:
+        # fromMe=True: mensagem enviada PELO número da Lorena (chip do bot).
+        # Ignoramos SEMPRE — seja resposta da API ou Jaqueline digitando no chip.
+        # Comandos admin da Jaqueline chegam pelo número pessoal dela (JAQUELINE_PHONE) abaixo.
+        if key.get("fromMe"):
+            log.debug("fromMe=True ignorado (phone=*%s)", phone[-4:] if len(phone) >= 4 else phone)
+            return jsonify({"status": "ignored_self"}), 200
+
+        # Comandos admin da Jaqueline (do número pessoal dela: 552499025732)
+        # match pelos últimos 8 dígitos para tolerar variações de JID do WhatsApp
+        if phone.endswith(JAQUELINE_PHONE[-8:]) or phone == JAQUELINE_PHONE:
+            log.info("Mensagem da Jaqueline: %s", text[:60])
             response = handle_command(text, phone)
-            send_whatsapp_tracked(phone, response)
+            send_whatsapp_tracked(JAQUELINE_PHONE, response)
             audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_command", "command": text[:100]})
             return jsonify({"status": "command_processed"}), 200
 
+        # Ignorar mensagens de grupos, broadcasts e status
+        if len(phone) > 15 or not phone.isdigit():
+            return jsonify({"status": "ignored_non_individual"}), 200
+
         # Mensagem do Dr. Tiago
-        if phone == TIAGO_PHONE:
-            send_whatsapp_tracked(phone,
+        if phone == TIAGO_PHONE or phone.endswith(TIAGO_PHONE[-8:]):
+            send_whatsapp_tracked(TIAGO_PHONE,
                 "Olá Dr. Tiago! Este é o bot Lorena (agendamento).\n"
                 "Pra comandos administrativos, use o número da Jaqueline.\n"
                 f"Pra dúvidas clínicas dos pacientes, use o Uriel ({PRESCRIPTION_BOT_PHONE}).")
@@ -217,6 +223,9 @@ def process_with_llm(phone: str, ph: str, text: str, session: dict):
             messages.append(HumanMessage(content=content))
         else:
             messages.append(AIMessage(content=content))
+    # Garante que a mensagem atual do paciente está sempre no final
+    if not messages or not isinstance(messages[-1], HumanMessage) or messages[-1].content != text:
+        messages.append(HumanMessage(content=text))
     try:
         response = _get_chat().invoke(messages)
         raw = response.content
