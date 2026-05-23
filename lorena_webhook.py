@@ -380,7 +380,7 @@ def redirect_to_prescription_bot(phone: str, ph: str, text: str):
 def handoff_to_jaqueline(phone: str, ph: str, triggered_by: str,
                          patient_name: str = "", subject: str = ""):
     send_whatsapp_tracked(phone,
-        "👤 Vou pedir pra nossa atendente Kaqueline te atender pessoalmente.\n"
+        "👤 Vou pedir pra nossa atendente Jaqueline te atender pessoalmente.\n"
         "Ela vai responder aqui mesmo, nesta conversa, em alguns instantes.")
     last4 = phone[-4:]
     notify_msg = (f"👋 *Novo encaminhamento para atendimento humano*\n\n"
