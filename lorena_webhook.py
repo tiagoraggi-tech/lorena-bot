@@ -523,6 +523,17 @@ def health():
     })
 
 
+@app.route("/test-llm", methods=["GET"])
+def test_llm():
+    try:
+        from langchain_core.messages import HumanMessage
+        chat = _get_chat()
+        resp = chat.invoke([HumanMessage(content="responda apenas: ok")])
+        return jsonify({"status": "ok", "response": resp.content})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e), "type": type(e).__name__}), 500
+
+
 if __name__ == "__main__":
     port = int(os.getenv("WEBHOOK_PORT", 6001))
     ngrok_token = os.getenv("NGROK_AUTHTOKEN")
