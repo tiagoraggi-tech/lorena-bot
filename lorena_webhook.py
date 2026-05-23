@@ -27,7 +27,7 @@ from lorena_state import (
 from lorena_classifier import LorenaClassifier
 from lorena_instructions import is_bot_active, handle_command, list_active_instructions
 from lorena_prompt import build_system_prompt
-from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured
+from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured, find_next_available_slot
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO,
@@ -267,6 +267,34 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
         except Exception:
             return handoff_to_jaqueline(phone, ph, "bot_failure")
 
+    if "CONFIRMAR_HORARIO" in text:
+        return handle_slot_confirmation(phone, ph)
+
+    if "BUSCAR_PROXIMO:" in text:
+        try:
+            payload = json.loads(text.split("BUSCAR_PROXIMO:", 1)[1].strip())
+            nome = payload.get("nome", "").strip()
+            telefone = payload.get("telefone", "").strip()
+        except Exception:
+            nome = session.get("collected_name", "")
+            telefone = session.get("collected_phone", "")
+        send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
+        result = find_next_available_slot()
+        if isinstance(result, dict) and "slots" in result:
+            next_date = result["date"]
+            next_slots = result["slots"]
+            update_session(ph, current_state="AWAITING_CONFIRMATION",
+                           collected_name=nome, collected_phone=telefone,
+                           collected_date=next_date, available_slots=next_slots, current_slot_index=0)
+            return offer_slot(phone, ph)
+        else:
+            send_whatsapp_tracked(phone,
+                "Não encontrei vagas disponíveis nos próximos dias. "
+                "Vou chamar a Jaqueline pra te ajudar! 😊")
+            return handoff_to_jaqueline(phone, ph, "no_slots", patient_name=nome,
+                                        subject="Sem vagas via busca automática")
+        return jsonify({"status": "next_slot_searched"}), 200
+
     send_whatsapp_tracked(phone, text)
     add_to_history(ph, "assistant", text)
     return jsonify({"status": "responded"}), 200
@@ -298,12 +326,17 @@ def handle_appointment_request(phone: str, ph: str, payload: dict):
                                     subject=f"Confirmar disponibilidade {data} pra {nome} ({telefone})")
 
     slots = get_available_times(data)
-    if isinstance(slots, dict) and "error" in slots:
-        send_whatsapp_tracked(phone, f"Não consegui verificar horários pra {data}. Pode tentar outra data?")
-        return jsonify({"status": "api_error"}), 200
-    if not slots:
-        send_whatsapp_tracked(phone, f"Não há horários disponíveis em {data}. Gostaria de tentar outra data?")
-        return jsonify({"status": "no_slots"}), 200
+    if isinstance(slots, dict) and "error" in slots or not slots:
+        # API indisponível ou sem slots — confirma dados ao paciente e encaminha Jaqueline
+        data_br = datetime.strptime(data, "%Y-%m-%d").strftime("%d/%m/%Y")
+        send_whatsapp_tracked(phone,
+            f"Ótimo, {nome}! 😊 Anotei sua solicitação:\n"
+            f"📅 Data desejada: *{data_br}*\n"
+            f"📱 Telefone: *{telefone}*\n\n"
+            f"Nossa atendente Jaqueline vai confirmar a disponibilidade e retornar pra você em breve!")
+        return handoff_to_jaqueline(phone, ph, "scheduling", patient_name=nome,
+                                    subject=f"Agendar {data_br} — {nome} ({telefone})")
+
 
     update_session(ph, current_state="AWAITING_CONFIRMATION",
                    collected_name=nome, collected_phone=telefone,
@@ -317,26 +350,96 @@ def offer_slot(phone: str, ph: str):
     idx = session.get("current_slot_index", 0)
 
     if idx >= len(slots):
+        # Slots do dia esgotados — busca automaticamente o próximo dia disponível
+        session = get_session_by_hash(ph)
+        current_date = session.get("collected_date")
+        result = find_next_available_slot(after_date=current_date)
+        if isinstance(result, dict) and "slots" in result:
+            next_date = result["date"]
+            next_date_br = result["date_br"]
+            next_weekday = result["weekday"]
+            next_slots = result["slots"]
+            update_session(ph, current_state="AWAITING_CONFIRMATION",
+                           collected_date=next_date, available_slots=next_slots, current_slot_index=0)
+            send_whatsapp_tracked(phone,
+                f"Não há mais horários nesse dia. O próximo disponível é na *{next_weekday}*, "
+                f"*{next_date_br}*. 😊\n"
+                f"Posso te oferecer um horário nesse dia?")
+            return jsonify({"status": "next_day_offered"}), 200
+        # API falhou ou sem vagas — encaminha pra Jaqueline
         send_whatsapp_tracked(phone,
-            "Infelizmente esgotamos os horários disponíveis nesse dia.\n"
-            "Gostaria de tentar outro dia?")
+            "Não encontrei vagas disponíveis nos próximos dias. "
+            "Vou chamar a Jaqueline pra te ajudar com o agendamento! 😊")
         update_session(ph, current_state="NEW", available_slots=None, current_slot_index=0)
-        return jsonify({"status": "slots_exhausted"}), 200
+        nome = session.get("collected_name", "")
+        return handoff_to_jaqueline(phone, ph, "no_slots", patient_name=nome,
+                                    subject="Sem vagas disponíveis via API")
+
 
     slot = slots[idx]
     try:
-        dt = datetime.fromisoformat(slot["DateTime"])
+        dt = datetime.fromisoformat(slot["DateTime"].replace("Z", "+00:00"))
         time_str = dt.strftime("%H:%M")
         date_str = dt.strftime("%d/%m/%Y")
+        weekday_names = {0: "segunda-feira", 1: "terça-feira", 2: "quarta-feira",
+                         3: "quinta-feira", 4: "sexta-feira", 5: "sábado", 6: "domingo"}
+        weekday = weekday_names.get(dt.weekday(), "")
     except Exception:
         time_str = slot.get("DateTime", "?")
         date_str = ""
+        weekday = ""
 
+    weekday_label = f"*{weekday}*, " if weekday else ""
     send_whatsapp_tracked(phone,
-        f"O próximo horário disponível é às *{time_str}* em {date_str}.\n"
-        f"Esse horário funciona pra você? (responda *sim* ou *não*)")
+        f"O próximo horário disponível é {weekday_label}*{date_str}* às *{time_str}*. 😊\n"
+        f"Funciona pra você? (responda *sim* ou *não*)")
     update_session(ph, current_state="AWAITING_CONFIRMATION")
     return jsonify({"status": "slot_offered"}), 200
+
+
+def handle_slot_confirmation(phone: str, ph: str):
+    """Paciente confirmou o slot oferecido — cria o agendamento."""
+    session = get_session_by_hash(ph)
+    nome = session.get("collected_name", "")
+    telefone = session.get("collected_phone", "")
+    slots = session.get("available_slots") or []
+    idx = session.get("current_slot_index", 0)
+
+    if not slots or idx >= len(slots):
+        # Sem slot disponível na sessão — volta a oferecer
+        return offer_slot(phone, ph)
+
+    slot = slots[idx]
+    dt_raw = slot.get("DateTime", "")
+    slot_id = slot.get("TimeSlotId", "")
+
+    if not is_api_configured():
+        return handoff_to_jaqueline(phone, ph, "api_not_configured", patient_name=nome,
+                                    subject=f"Confirmar agendamento {dt_raw} — {nome} ({telefone})")
+
+    result = create_appointment(nome, telefone, dt_raw, slot_id)
+    if isinstance(result, dict) and result.get("success"):
+        try:
+            dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            date_label = dt.strftime("%d/%m/%Y")
+            time_label = dt.strftime("%H:%M")
+        except Exception:
+            date_label = dt_raw
+            time_label = ""
+        send_whatsapp_tracked(phone,
+            f"✅ Consulta confirmada!\n"
+            f"📅 *{date_label}* às *{time_label}*\n"
+            f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR\n\n"
+            f"Se precisar cancelar ou reagendar, é só me chamar! 😊")
+        update_session(ph, current_state="NEW", available_slots=None, current_slot_index=0)
+        return jsonify({"status": "appointment_confirmed"}), 200
+    else:
+        err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
+        log.error("handle_slot_confirmation falhou: %s", err)
+        send_whatsapp_tracked(phone,
+            "Tive um problema técnico ao confirmar. Vou chamar a Jaqueline pra te ajudar! 😊")
+        return handoff_to_jaqueline(phone, ph, "api_error", patient_name=nome,
+                                    subject=f"Erro ao agendar {dt_raw} — {nome} ({telefone}): {err}")
 
 
 def offer_next_slot(phone: str, ph: str):
