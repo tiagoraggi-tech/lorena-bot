@@ -140,36 +140,12 @@ def messages_upsert():
         phone = phone.split("@")[0] if "@" in phone else phone
         phone = phone.replace("-", "").strip()
 
-        # fromMe=True: mensagem enviada PELO número da Lorena (5524988370406)
-        # Pode ser: (a) bot via API → ignorar, ou (b) Jaqueline digitou manualmente
-        # no celular/WhatsApp Web da Lorena → pausar sessão do paciente
+        # fromMe=True: mensagem enviada PELO número da Lorena (chip do bot).
+        # Ignoramos SEMPRE — seja resposta da API ou Jaqueline digitando no chip.
+        # Comandos admin da Jaqueline chegam pelo número pessoal dela (JAQUELINE_PHONE) abaixo.
         if key.get("fromMe"):
-            if is_message_from_bot(phone, text):
-                # Enviada pela Evolution API do bot → ignorar
-                return jsonify({"status": "ignored_self_api"}), 200
-            else:
-                # Jaqueline digitou manualmente no chip da Lorena → intervenção humana
-                if phone and phone.isdigit() and len(phone) <= 15:
-                    ph = hash_phone(phone)
-                    pause_session(ph, minutes=60)
-                    update_session(ph, current_state="HANDED_OFF")
-                    log.info("Intervenção manual de Jaqueline (via bot) para *%s — sessão pausada 60min",
-                             phone[-4:])
-                    try:
-                        conn = sqlite3.connect(DB_PATH)
-                        cur = conn.cursor()
-                        cur.execute("""
-                            INSERT INTO manual_interventions
-                                (patient_phone_hash, intervention_text,
-                                 bot_state_at_intervention, bot_paused_until)
-                            VALUES (?, ?, ?, ?)
-                        """, (ph, text[:200], "HANDED_OFF",
-                              (datetime.utcnow() + timedelta(minutes=60)).isoformat()))
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        log.warning("manual_interventions insert falhou: %s", e)
-                return jsonify({"status": "manual_intervention_detected"}), 200
+            log.debug("fromMe=True ignorado (phone=*%s)", phone[-4:] if len(phone) >= 4 else phone)
+            return jsonify({"status": "ignored_self"}), 200
 
         # Comandos admin da Jaqueline (do número pessoal dela: 552499025732)
         # match pelos últimos 8 dígitos para tolerar variações de JID do WhatsApp
@@ -247,6 +223,9 @@ def process_with_llm(phone: str, ph: str, text: str, session: dict):
             messages.append(HumanMessage(content=content))
         else:
             messages.append(AIMessage(content=content))
+    # Garante que a mensagem atual do paciente está sempre no final
+    if not messages or not isinstance(messages[-1], HumanMessage) or messages[-1].content != text:
+        messages.append(HumanMessage(content=text))
     try:
         response = _get_chat().invoke(messages)
         raw = response.content
@@ -401,7 +380,7 @@ def redirect_to_prescription_bot(phone: str, ph: str, text: str):
 def handoff_to_jaqueline(phone: str, ph: str, triggered_by: str,
                          patient_name: str = "", subject: str = ""):
     send_whatsapp_tracked(phone,
-        "👤 Vou pedir pra nossa atendente Jaqueline te atender pessoalmente.\n"
+        "👤 Vou pedir pra nossa atendente Kaqueline te atender pessoalmente.\n"
         "Ela vai responder aqui mesmo, nesta conversa, em alguns instantes.")
     last4 = phone[-4:]
     notify_msg = (f"👋 *Novo encaminhamento para atendimento humano*\n\n"
