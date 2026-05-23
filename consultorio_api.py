@@ -1,96 +1,112 @@
 """
-consultorio_api.py — Integração com consultorio.me
+consultorio_api.py — Integração com api.consultoriome.com
 
-⚠️  GERADO POR COWORK COM BASE EM INVESTIGAÇÃO DA API REAL VIA CHROME DEVTOOLS.
-    Confirme cada endpoint testando antes de ir pra produção.
+API REST oficial (documentação Postman: documenter.getpostman.com/view/1116511/2sA2rAyN3Y)
 
-ENDPOINTS DESCOBERTOS (via Network tab, navegação read-only na agenda):
-  GET  /agenda/loaddate/{YYYYMMDD}              → slots/agenda de uma data
-  GET  /agenda/_listaagenda?dia=&mes=&ano=       → lista consultas agendadas
-  GET  /agenda/navdata/{YYYYMMDD}               → dados de navegação
-  GET  /agenda/infocalendario/?ano=&mes=         → info do mês
-  GET  /clinica/getapikey                        → obtém API key da clínica
-  GET  /util/gettipos/{clinica_id}?meros={pro_id}→ tipos de consulta disponíveis
+FLUXO DE AUTH:
+  1. POST /token com clientId + secret → Bearer token
+  2. Usar Bearer token em todos os demais endpoints
 
-ENDPOINTS NÃO CONFIRMADOS (criação/cancelamento não foram testados):
-  POST /agenda/create  (ou similar) → [TODO: confirmar com Tiago]
-  POST/DELETE /agenda/cancel        → [TODO: confirmar com Tiago]
+ENDPOINTS USADOS:
+  POST /token                  → obtém Bearer token
+  GET  /available-times        → horários disponíveis de um profissional
+  POST /create-appointment     → cria agendamento
+  POST /cancel-appointment     → cancela agendamento
 
-MÉTODO DE AUTH:
-  - Interface web usa sessão/cookie
-  - ClientId + Secret via Basic Auth para API programática (a confirmar)
-  - CONSULTORIO_AUTH_METHOD=basic no .env
-
-SANDBOX:
-  - INCERTO — não encontrado sandbox explícito; testar com cautela
-
-IDs INTERNOS OBSERVADOS NA UI:
-  - Clínica ID: 2782
-  - Profissional (meros): 837
-  Esses IDs podem variar. O PRO_ID do .env (dkvdtgk...) é o identificador externo.
+VARIÁVEIS DE AMBIENTE:
+  CONSULTORIO_CLIENT_ID   → clientId fornecido pelo consultorio.me
+  CONSULTORIO_SECRET      → secret fornecido pelo consultorio.me
+  CONSULTORIO_PRO_ID      → ID do profissional (Dr. Tiago) na plataforma
+  CONSULTORIO_API_BASE    → base URL (padrão: https://api.consultoriome.com)
 """
 import os
-import base64
 import json
 import logging
 import requests
 from datetime import datetime, date, timedelta
-from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 log = logging.getLogger("consultorio_api")
 
 # ===== Configuração =====
-BASE_URL = os.getenv("CONSULTORIO_API_BASE", "https://consultorio.me")
-PRO_ID   = os.getenv("CONSULTORIO_PRO_ID")
-CLIENT_ID = os.getenv("CONSULTORIO_CLIENT_ID")
-SECRET    = os.getenv("CONSULTORIO_SECRET")
-AUTH_METHOD = os.getenv("CONSULTORIO_AUTH_METHOD", "basic")
+BASE_URL  = os.getenv("CONSULTORIO_API_BASE", "https://api.consultoriome.com")
+PRO_ID    = os.getenv("CONSULTORIO_PRO_ID", "")
+CLIENT_ID = os.getenv("CONSULTORIO_CLIENT_ID", "")
+SECRET    = os.getenv("CONSULTORIO_SECRET", "")
 
-if not CLIENT_ID or CLIENT_ID == "<TIAGO_PREENCHE>":
-    log.warning("⚠️ CONSULTORIO_CLIENT_ID não configurado — API em modo stub")
+# Cache do token em memória (renovado automaticamente quando expira)
+_token_cache = {"token": None, "expires_at": None}
+
+
+def is_api_configured() -> bool:
+    return bool(CLIENT_ID and SECRET and CLIENT_ID != "<TIAGO_PREENCHE>")
+
+
+def _get_token() -> str | None:
+    """
+    Obtém Bearer token via POST /token.
+    Usa cache em memória — renova automaticamente quando expira.
+    """
+    global _token_cache
+    now = datetime.utcnow()
+
+    # Retorna token cacheado se ainda válido (com margem de 60s)
+    if _token_cache["token"] and _token_cache["expires_at"]:
+        if now < _token_cache["expires_at"]:
+            return _token_cache["token"]
+
+    if not is_api_configured():
+        log.error("_get_token: API não configurada (CLIENT_ID ou SECRET ausente)")
+        return None
+
+    try:
+        r = requests.post(
+            f"{BASE_URL}/token",
+            json={"clientId": CLIENT_ID, "secret": SECRET},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        log.debug("_get_token response: %s", str(data)[:200])
+
+        # Extrai token — tenta campos comuns
+        token = (data.get("token") or data.get("access_token") or
+                 data.get("accessToken") or data.get("bearer"))
+        if not token and isinstance(data, str):
+            token = data  # Algumas APIs retornam o token direto como string
+
+        if not token:
+            log.error("_get_token: token não encontrado na resposta: %s", data)
+            return None
+
+        # Calcula expiração (padrão: 1 hora se não informado)
+        expires_in = data.get("expiresIn") or data.get("expires_in") or 3600
+        _token_cache = {
+            "token": token,
+            "expires_at": now + timedelta(seconds=int(expires_in) - 60),
+        }
+        log.info("_get_token: token obtido, expira em %ds", expires_in)
+        return token
+
+    except requests.exceptions.HTTPError as e:
+        log.error("_get_token HTTP error %s: %s", e.response.status_code, e.response.text[:200])
+        return None
+    except Exception as e:
+        log.error("_get_token falhou: %s", e)
+        return None
 
 
 def _auth_headers() -> dict:
-    """
-    Retorna headers de autenticação.
-    Método confirmado: Basic Auth com ClientId:Secret em Base64.
-    Se der 401, tente AUTH_METHOD=apikey e CONSULTORIO_API_KEY no .env.
-    """
-    if AUTH_METHOD == "basic":
-        if not CLIENT_ID or not SECRET:
-            raise ValueError("CONSULTORIO_CLIENT_ID e CONSULTORIO_SECRET são obrigatórios")
-        raw = f"{CLIENT_ID}:{SECRET}"
-        encoded = base64.b64encode(raw.encode()).decode()
-        return {
-            "Authorization": f"Basic {encoded}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-    elif AUTH_METHOD == "bearer":
-        # [TODO: confirmar com Tiago se houver OAuth2 token endpoint]
-        token = os.getenv("CONSULTORIO_BEARER_TOKEN")
-        if not token:
-            raise ValueError("CONSULTORIO_BEARER_TOKEN não configurado")
-        return {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-    elif AUTH_METHOD == "apikey":
-        # Alternativa: usar a API key obtida via /clinica/getapikey
-        api_key = os.getenv("CONSULTORIO_API_KEY")
-        return {
-            "X-API-Key": api_key,
-            "Content-Type": "application/json",
-        }
-    else:
-        raise ValueError(f"AUTH_METHOD desconhecido: {AUTH_METHOD}")
-
-
-def _date_to_yyyymmdd(date_str: str) -> str:
-    """Converte YYYY-MM-DD → YYYYMMDD (formato interno consultorio.me)."""
-    return date_str.replace("-", "")
+    token = _get_token()
+    if not token:
+        raise ValueError("Não foi possível obter token de autenticação")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
 
 def get_available_times(date_str: str) -> list[dict] | dict:
@@ -103,196 +119,168 @@ def get_available_times(date_str: str) -> list[dict] | dict:
     Returns:
         Lista de slots: [{"DateTime": "2026-05-26T14:00:00", "TimeSlotId": "..."}, ...]
         Ou {"error": "..."} se falhar.
-
-    Endpoint descoberto: GET /agenda/loaddate/{YYYYMMDD}
-    [TODO: confirmar formato exato da resposta JSON com Tiago após teste real]
     """
     if not is_api_configured():
-        return {"error": "API não configurada — preencha CONSULTORIO_CLIENT_ID e CONSULTORIO_SECRET no .env"}
-
-    date_fmt = _date_to_yyyymmdd(date_str)
-    url = f"{BASE_URL}/agenda/loaddate/{date_fmt}"
+        return {"error": "API não configurada"}
 
     try:
-        r = requests.get(url, headers=_auth_headers(), timeout=10)
+        params = {"date": date_str}
+        if PRO_ID:
+            params["professionalId"] = PRO_ID
+
+        r = requests.get(
+            f"{BASE_URL}/available-times",
+            headers=_auth_headers(),
+            params=params,
+            timeout=15,
+        )
         r.raise_for_status()
         data = r.json()
-        log.info("get_available_times(%s) → %d itens", date_str, len(data) if isinstance(data, list) else 1)
+        log.info("get_available_times(%s) → %s", date_str, str(data)[:200])
 
-        # [TODO: ajustar parsing conforme resposta real]
-        # Tentativa 1: resposta é lista direta
         if isinstance(data, list):
             return _normalize_slots(data)
-        # Tentativa 2: resposta é dict com chave "slots" ou similar
         if isinstance(data, dict):
-            for key in ("slots", "horarios", "available", "data", "items"):
-                if key in data:
+            for key in ("slots", "horarios", "available", "data", "items", "times"):
+                if key in data and isinstance(data[key], list):
                     return _normalize_slots(data[key])
-            # Retorna tudo pra Tiago inspecionar
-            return {"raw": data, "error": "formato inesperado — inspecione 'raw' e ajuste o parsing"}
+            return {"error": "formato inesperado", "raw": data}
+
         return {"error": f"Resposta inesperada: {type(data)}"}
 
+    except ValueError as e:
+        # Falha ao obter token
+        return {"error": str(e)}
     except requests.exceptions.HTTPError as e:
-        log.error("HTTP error get_available_times: %s %s", e.response.status_code, e.response.text[:200])
-        return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
-    except requests.exceptions.RequestException as e:
-        log.error("get_available_times failed: %s", e)
+        log.error("get_available_times HTTP %s: %s", e.response.status_code, e.response.text[:200])
+        return {"error": f"HTTP {e.response.status_code}"}
+    except Exception as e:
+        log.error("get_available_times falhou: %s", e)
         return {"error": str(e)}
 
 
 def _normalize_slots(raw_slots: list) -> list[dict]:
-    """
-    Normaliza slots pro formato esperado pelo webhook: [{"DateTime": "...", "TimeSlotId": "..."}]
-
-    [TODO: ajustar campos conforme resposta real da API]
-    Candidatos comuns para DateTime: "datetime", "data", "horario", "start", "DataHora"
-    Candidatos comuns para TimeSlotId: "id", "slotId", "idAgenda", "token"
-    """
+    """Normaliza slots para o formato interno: [{"DateTime": "...", "TimeSlotId": "..."}]"""
     normalized = []
     for slot in raw_slots:
         if not isinstance(slot, dict):
             continue
-        dt = (slot.get("DateTime") or slot.get("datetime") or
-              slot.get("DataHora") or slot.get("data") or
-              slot.get("horario") or slot.get("start"))
-        sid = (slot.get("TimeSlotId") or slot.get("id") or
-               slot.get("slotId") or slot.get("idAgenda") or
-               slot.get("token") or str(dt))
+        dt = (slot.get("DateTime") or slot.get("datetime") or slot.get("startTime") or
+              slot.get("DataHora") or slot.get("data") or slot.get("start") or
+              slot.get("time") or slot.get("horario"))
+        sid = (slot.get("TimeSlotId") or slot.get("id") or slot.get("slotId") or
+               slot.get("scheduleId") or slot.get("idAgenda") or str(dt))
         if dt:
             normalized.append({"DateTime": dt, "TimeSlotId": str(sid), "_raw": slot})
     return normalized
 
 
-def create_appointment(name: str, phone: str, date_time: str,
-                       time_slot_id: str, birth_date: str = "1900-01-01") -> dict:
+def find_next_available_slot(after_date: str = None, weeks_ahead: int = 8) -> dict:
     """
-    Cria agendamento no consultorio.me.
-
-    Args:
-        name: nome completo do paciente
-        phone: telefone com DDD (sem +55), ex: "24988001234"
-        date_time: ISO 8601, ex: "2026-05-26T14:00:00"
-        time_slot_id: ID do slot retornado por get_available_times
-        birth_date: data de nascimento YYYY-MM-DD (default placeholder)
+    Busca automaticamente o próximo horário disponível nas próximas segundas/quartas.
 
     Returns:
-        {"success": True, "appointment_id": "..."} ou {"error": "..."}
-
-    [TODO: ENDPOINT NÃO CONFIRMADO — descobrir com Tiago]
-    Candidatos baseados no padrão da UI:
-      POST /agenda/create
-      POST /agenda/novaConsulta
-      POST /agenda/save
-    Payload provável (a confirmar via DevTools ao criar consulta de teste):
-      {"pro_id": PRO_ID, "nome": name, "telefone": phone, "dataHora": date_time,
-       "slotId": time_slot_id, "dataNascimento": birth_date}
+        {"date": "YYYY-MM-DD", "date_br": "DD/MM/YYYY", "weekday": "segunda/quarta", "slots": [...]}
+        ou {"error": "..."} se nenhum slot encontrado
     """
     if not is_api_configured():
         return {"error": "API não configurada"}
 
-    # [TODO: confirmar endpoint real com Tiago]
-    # Tente: POST /agenda/create — se der 404, tente /agenda/novaConsulta
-    url = f"{BASE_URL}/agenda/create"
+    try:
+        start = (datetime.strptime(after_date, "%Y-%m-%d").date()
+                 if after_date else date.today())
+    except Exception:
+        start = date.today()
+
+    current = start + timedelta(days=1)
+    max_days = weeks_ahead * 7
+    checked = 0
+    weekday_names = {0: "segunda-feira", 2: "quarta-feira"}
+
+    while checked < max_days:
+        if current.weekday() in [0, 2]:
+            date_str = current.strftime("%Y-%m-%d")
+            slots = get_available_times(date_str)
+            if isinstance(slots, list) and len(slots) > 0:
+                log.info("find_next_available_slot: %d slot(s) em %s", len(slots), date_str)
+                return {
+                    "date": date_str,
+                    "date_br": current.strftime("%d/%m/%Y"),
+                    "weekday": weekday_names.get(current.weekday(), ""),
+                    "slots": slots,
+                }
+            checked += 1
+        current += timedelta(days=1)
+
+    return {"error": "Nenhum horário disponível nas próximas semanas"}
+
+
+def create_appointment(name: str, phone: str, date_time: str,
+                       time_slot_id: str, birth_date: str = "") -> dict:
+    """
+    Cria agendamento via POST /create-appointment.
+
+    Returns:
+        {"success": True, "appointment_id": "..."} ou {"error": "..."}
+    """
+    if not is_api_configured():
+        return {"error": "API não configurada"}
 
     payload = {
-        "pro_id": PRO_ID,
-        "patient_name": name,
-        "patient_phone": phone,
-        "birth_date": birth_date,
-        "appointment_datetime": date_time,
-        "time_slot_id": time_slot_id,
+        "professionalId": PRO_ID,
+        "patientName": name,
+        "patientPhone": phone,
+        "dateTime": date_time,
+        "timeSlotId": time_slot_id,
     }
+    if birth_date:
+        payload["birthDate"] = birth_date
 
     try:
-        r = requests.post(url, headers=_auth_headers(), json=payload, timeout=15)
+        r = requests.post(
+            f"{BASE_URL}/create-appointment",
+            headers=_auth_headers(),
+            json=payload,
+            timeout=20,
+        )
         r.raise_for_status()
         data = r.json()
-        log.info("create_appointment OK para %s em %s", name[:20], date_time)
-        # Normaliza resposta
-        appt_id = (data.get("id") or data.get("appointment_id") or
-                   data.get("idAgenda") or data.get("idConsulta") or "unknown")
+        log.info("create_appointment OK: %s em %s", name[:20], date_time)
+        appt_id = (data.get("id") or data.get("appointmentId") or
+                   data.get("appointment_id") or data.get("idAgenda") or "ok")
         return {"success": True, "appointment_id": str(appt_id), "_raw": data}
+    except ValueError as e:
+        return {"error": str(e)}
     except requests.exceptions.HTTPError as e:
-        log.error("create_appointment HTTP error: %s", e.response.text[:300])
+        log.error("create_appointment HTTP %s: %s", e.response.status_code, e.response.text[:300])
         return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
-    except requests.exceptions.RequestException as e:
-        log.error("create_appointment failed: %s", e)
+    except Exception as e:
+        log.error("create_appointment falhou: %s", e)
         return {"error": str(e)}
 
 
 def cancel_appointment(appointment_id: str) -> dict:
     """
-    Cancela agendamento.
-
-    [TODO: ENDPOINT NÃO CONFIRMADO — descobrir com Tiago]
-    Candidatos:
-      DELETE /agenda/{appointment_id}
-      POST   /agenda/cancel/{appointment_id}
-      POST   /agenda/cancelar
-    [COWORK_NEVER_TEST_IN_PROD] Não cancele agendamentos reais durante testes.
+    Cancela agendamento via POST /cancel-appointment.
     """
     if not is_api_configured():
         return {"error": "API não configurada"}
 
-    # [TODO: confirmar endpoint]
-    url = f"{BASE_URL}/agenda/{appointment_id}/cancel"
-
     try:
-        r = requests.post(url, headers=_auth_headers(), timeout=10)
+        r = requests.post(
+            f"{BASE_URL}/cancel-appointment",
+            headers=_auth_headers(),
+            json={"appointmentId": appointment_id},
+            timeout=15,
+        )
         r.raise_for_status()
         log.info("cancel_appointment OK: %s", appointment_id)
-        return {"success": True, "_raw": r.json() if r.text else {}}
+        return {"success": True}
+    except ValueError as e:
+        return {"error": str(e)}
     except requests.exceptions.HTTPError as e:
-        log.error("cancel_appointment HTTP error: %s", e.response.text[:200])
-        return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
-    except requests.exceptions.RequestException as e:
-        log.error("cancel_appointment failed: %s", e)
-        return {"error": str(e)}
-
-
-def get_agenda_for_month(year: int, month: int) -> dict:
-    """
-    [EXTRA] Retorna informações do calendário para um mês.
-    Endpoint confirmado: GET /agenda/infocalendario/?ano={year}&mes={month}
-    """
-    if not is_api_configured():
-        return {"error": "API não configurada"}
-    url = f"{BASE_URL}/agenda/infocalendario/"
-    try:
-        r = requests.get(url, headers=_auth_headers(),
-                         params={"ano": year, "mes": month}, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        log.error("cancel_appointment HTTP %s: %s", e.response.status_code, e.response.text[:200])
+        return {"error": f"HTTP {e.response.status_code}"}
     except Exception as e:
+        log.error("cancel_appointment falhou: %s", e)
         return {"error": str(e)}
-
-
-def is_api_configured() -> bool:
-    """Retorna True se temos as credenciais mínimas necessárias."""
-    has_client = CLIENT_ID and CLIENT_ID != "<TIAGO_PREENCHE>"
-    has_secret = SECRET and SECRET != "<TIAGO_PREENCHE>"
-    return bool(BASE_URL and has_client and has_secret)
-
-
-if __name__ == "__main__":
-    print(f"API configurada: {is_api_configured()}")
-    print(f"BASE_URL: {BASE_URL}")
-    print(f"AUTH_METHOD: {AUTH_METHOD}")
-    print(f"PRO_ID: {PRO_ID[:20] if PRO_ID else 'NÃO DEFINIDO'}...")
-
-    if is_api_configured():
-        # Teste leve: tenta listar slots de uma segunda-feira futura
-        today = date.today()
-        days_ahead = (7 - today.weekday()) % 7 or 7  # próxima segunda
-        test_date = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-        print(f"\nTestando get_available_times para {test_date} (segunda-feira)...")
-        result = get_available_times(test_date)
-        if "error" in result:
-            print(f"❌ Erro: {result['error']}")
-        else:
-            print(f"✅ {len(result)} slots retornados")
-            if result:
-                print(f"   Primeiro slot: {result[0]}")
-    else:
-        print("\n⚠️  Preencha CONSULTORIO_CLIENT_ID e CONSULTORIO_SECRET no .env para testar")
-        print("   Depois rode: python consultorio_api.py")
