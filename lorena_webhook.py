@@ -525,13 +525,40 @@ def health():
 
 @app.route("/test-llm", methods=["GET"])
 def test_llm():
+    """Diagnóstico completo do Groq — checa env vars, langchain e raw API."""
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    result = {
+        "version": "2026-05-23-v2",
+        "groq_key_present": bool(groq_key),
+        "groq_key_prefix": (groq_key[:8] + "...") if groq_key else "MISSING",
+        "groq_model": groq_model,
+    }
+    # Teste via langchain-groq
     try:
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import HumanMessage as HM
         chat = _get_chat()
-        resp = chat.invoke([HumanMessage(content="responda apenas: ok")])
-        return jsonify({"status": "ok", "response": resp.content})
+        resp = chat.invoke([HM(content="responda apenas: ok")])
+        result["langchain_test"] = {"status": "ok", "response": resp.content}
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "type": type(e).__name__}), 500
+        result["langchain_test"] = {"status": "error", "error": str(e), "type": type(e).__name__}
+    # Teste via requests direto na API Groq
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            json={"model": groq_model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 5},
+            timeout=15
+        )
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text[:500]
+        result["raw_api_test"] = {"http_status": r.status_code, "body": body}
+    except Exception as e:
+        result["raw_api_test"] = {"status": "error", "error": str(e)}
+    ok = result.get("langchain_test", {}).get("status") == "ok"
+    return jsonify(result), 200 if ok else 500
 
 
 if __name__ == "__main__":
