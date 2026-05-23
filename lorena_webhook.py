@@ -17,8 +17,7 @@ try:
 except ImportError:
     _PYNGROK = False
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from groq import Groq
 
 from db_init import migrate_db
 from lorena_state import (
@@ -49,18 +48,44 @@ DB_PATH = os.getenv("DB_PATH", "/data/lorena.db")
 AUDIT_LOG = os.getenv("AUDIT_LOG", "/data/lorena_audit.jsonl")
 Path(AUDIT_LOG).parent.mkdir(parents=True, exist_ok=True)
 
-_chat = None
+_groq_client = None
 _classifier = None
 
-def _get_chat():
-    global _chat
-    if _chat is None:
-        _chat = ChatGroq(
-            api_key=os.getenv("GROQ_API_KEY"),
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0.3,
-        )
-    return _chat
+# Modelos em ordem de preferência — tenta cada um até funcionar
+GROQ_MODELS = [
+    os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "llama-3.1-70b-versatile",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
+
+def _get_groq_client() -> Groq:
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
+
+
+def call_groq(messages: list[dict], max_tokens: int = 800) -> str:
+    """Chama o Groq SDK diretamente com fallback entre modelos."""
+    client = _get_groq_client()
+    last_err = None
+    for model in GROQ_MODELS:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            log.info("Groq OK com modelo: %s", model)
+            return resp.choices[0].message.content
+        except Exception as e:
+            log.warning("Groq modelo %s falhou: %s", model, e)
+            last_err = e
+    raise last_err
+
 
 def _get_classifier():
     global _classifier
@@ -217,22 +242,19 @@ def handle_patient_message(phone: str, text: str):
 
 def process_with_llm(phone: str, ph: str, text: str, session: dict):
     history = session.get("conversation_history", []) or []
-    messages = [SystemMessage(content=build_system_prompt())]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     for item in history[-6:]:
-        role = item.get("role")
+        role = item.get("role", "user")
         content = item.get("content", "")
-        if role == "user":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
+        # Groq aceita "user" e "assistant"
+        messages.append({"role": role if role in ("user", "assistant") else "user", "content": content})
     # Garante que a mensagem atual do paciente está sempre no final
-    if not messages or not isinstance(messages[-1], HumanMessage) or messages[-1].content != text:
-        messages.append(HumanMessage(content=text))
+    if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != text:
+        messages.append({"role": "user", "content": text})
     try:
-        response = _get_chat().invoke(messages)
-        raw = response.content
+        raw = call_groq(messages)
     except Exception as e:
-        log.error("LLM falhou: %s", e)
+        log.error("LLM falhou (todos os modelos): %s", e)
         send_whatsapp_tracked(phone, "Desculpe, tive um problema técnico. Pode repetir em alguns segundos?")
         return jsonify({"status": "llm_error"}), 200
     return process_llm_response(phone, ph, raw, session)
@@ -525,39 +547,34 @@ def health():
 
 @app.route("/test-llm", methods=["GET"])
 def test_llm():
-    """Diagnóstico completo do Groq — checa env vars, langchain e raw API."""
+    """Diagnóstico completo do Groq SDK."""
     groq_key = os.getenv("GROQ_API_KEY", "")
     groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     result = {
-        "version": "2026-05-23-v2",
+        "version": "2026-05-23-v3",
         "groq_key_present": bool(groq_key),
         "groq_key_prefix": (groq_key[:8] + "...") if groq_key else "MISSING",
-        "groq_model": groq_model,
+        "groq_model_env": groq_model,
+        "models_tried": [],
     }
-    # Teste via langchain-groq
-    try:
-        from langchain_core.messages import HumanMessage as HM
-        chat = _get_chat()
-        resp = chat.invoke([HM(content="responda apenas: ok")])
-        result["langchain_test"] = {"status": "ok", "response": resp.content}
-    except Exception as e:
-        result["langchain_test"] = {"status": "error", "error": str(e), "type": type(e).__name__}
-    # Teste via requests direto na API Groq
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-            json={"model": groq_model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 5},
-            timeout=15
-        )
+    # Testa cada modelo individualmente para ver quais funcionam
+    client = _get_groq_client()
+    working_model = None
+    for model in GROQ_MODELS:
         try:
-            body = r.json()
-        except Exception:
-            body = r.text[:500]
-        result["raw_api_test"] = {"http_status": r.status_code, "body": body}
-    except Exception as e:
-        result["raw_api_test"] = {"status": "error", "error": str(e)}
-    ok = result.get("langchain_test", {}).get("status") == "ok"
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "responda apenas: ok"}],
+                temperature=0.3,
+                max_tokens=5,
+            )
+            result["models_tried"].append({"model": model, "status": "ok", "response": resp.choices[0].message.content})
+            if not working_model:
+                working_model = model
+        except Exception as e:
+            result["models_tried"].append({"model": model, "status": "error", "error": str(e)})
+    result["working_model"] = working_model
+    ok = working_model is not None
     return jsonify(result), 200 if ok else 500
 
 
