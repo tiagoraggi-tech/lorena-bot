@@ -55,6 +55,12 @@ app.add_url_rule(
     view_func=_wh.health,
     methods=["GET"],
 )
+app.add_url_rule(
+    "/test-llm",
+    endpoint="test_llm",
+    view_func=_wh.test_llm,
+    methods=["GET"],
+)
 
 # ── Rotas do painel admin ──────────────────────────────────────────
 import lorena_admin as _adm
