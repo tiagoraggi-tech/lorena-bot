@@ -54,9 +54,8 @@ _classifier = None
 # Modelos em ordem de preferência — tenta cada um até funcionar
 GROQ_MODELS = [
     os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-    "llama-3.1-70b-versatile",
-    "llama3-70b-8192",
-    "mixtral-8x7b-32768",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
     "gemma2-9b-it",
 ]
 
