@@ -1,5 +1,5 @@
 """
-lorena_state.py — Gestão de estado por paciente (multi-sessão)
+lorena_state.py -- Gestao de estado por paciente (multi-sessao)
 """
 import os
 import json
@@ -44,7 +44,7 @@ def get_or_create_session(phone: str) -> dict:
     if row["last_message_at"]:
         last_msg = datetime.fromisoformat(row["last_message_at"])
         if (datetime.utcnow() - last_msg).total_seconds() > SESSION_TIMEOUT_HOURS * 3600:
-            log.info("Sessão expirada pra *%s, reset", last4)
+            log.info("Sessao expirada pra *%s, reset", last4)
             cur.execute("""
                 UPDATE patient_sessions
                 SET current_state='NEW', collected_name=NULL, collected_phone=NULL,
@@ -121,4 +121,23 @@ def is_session_paused(phone_hash: str) -> bool:
 def pause_session(phone_hash: str, minutes: int = 30) -> None:
     paused_until = (datetime.utcnow() + timedelta(minutes=minutes)).isoformat()
     update_session(phone_hash, paused_until=paused_until)
-    log.info("Sessão *%s pausada até %s", phone_hash[:8], paused_until)
+    log.info("Sessao *%s pausada ate %s", phone_hash[:8], paused_until)
+
+
+def resume_all_sessions() -> int:
+    """Remove o pause de todas as sessoes e reseta HANDED_OFF -> NEW.
+    Retorna o numero de sessoes reativadas."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE patient_sessions
+        SET paused_until = NULL,
+            current_state = CASE WHEN current_state = 'HANDED_OFF' THEN 'NEW' ELSE current_state END,
+            updated_at = ?
+        WHERE paused_until IS NOT NULL OR current_state = 'HANDED_OFF'
+    """, (datetime.utcnow().isoformat(),))
+    count = cur.rowcount
+    conn.commit()
+    conn.close()
+    log.info("resume_all_sessions: %d sessao(oes) reativada(s)", count)
+    return count
