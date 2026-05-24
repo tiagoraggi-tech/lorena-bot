@@ -467,13 +467,23 @@ def handle_slot_confirmation(phone: str, ph: str):
             time_label = ""
         appt_id = result.get("appointment_id", "")
         is_retorno = bool(session.get("is_retorno", 0))
+        tipo_label = "Retorno (gratuito)" if is_retorno else "Consulta regular"
         retorno_line = "\n💚 *Consulta de retorno — gratuita!*" if is_retorno else ""
+        # Confirmacao para o paciente
         send_whatsapp_tracked(phone,
             f"✅ Consulta confirmada!\n"
             f"📅 *{date_label}* às *{time_label}*\n"
             f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR"
             f"{retorno_line}\n\n"
             f"Se precisar cancelar ou reagendar, é só me chamar! 😊")
+        # Notificacao para a Jaqueline com tipo de consulta
+        send_whatsapp_tracked(JAQUELINE_PHONE,
+            f"📋 *Agendamento confirmado pelo bot*\n\n"
+            f"👤 Paciente: *{nome}*\n"
+            f"📅 Data/hora: *{date_label}* às *{time_label}*\n"
+            f"🔖 Tipo: *{tipo_label}*\n"
+            f"📱 WhatsApp: wa.me/{phone}\n"
+            f"🆔 ID: {appt_id}")
         update_session(ph, current_state="NEW", available_slots=None,
                        current_slot_index=0, last_appointment_id=appt_id,
                        is_retorno=0)
