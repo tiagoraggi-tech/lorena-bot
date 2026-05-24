@@ -303,12 +303,11 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
         try:
             payload = json.loads(text.split("BUSCAR_PROXIMO:", 1)[1].strip())
             nome = payload.get("nome", "").strip()
-            telefone = payload.get("telefone", "").strip()
             cpf = payload.get("cpf", "").strip()
         except Exception:
             nome = session.get("collected_name", "")
-            telefone = session.get("collected_phone", "")
             cpf = session.get("collected_document", "")
+        telefone = phone  # sempre usa o WhatsApp de quem está conversando
         add_to_history(ph, "assistant", "Deixa eu verificar a próxima vaga disponível... 🔍")
         send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
         result = find_next_available_slot()
@@ -335,7 +334,7 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
 
 def handle_appointment_request(phone: str, ph: str, payload: dict):
     nome = payload.get("nome", "").strip()
-    telefone = payload.get("telefone", "").strip()
+    telefone = phone  # sempre usa o WhatsApp de quem está conversando
     cpf = payload.get("cpf", "").strip()
     data = payload.get("data", "").strip()
 
