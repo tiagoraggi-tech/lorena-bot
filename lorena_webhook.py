@@ -597,7 +597,8 @@ def health():
 def set_instruction_internal():
     """Endpoint interno protegido — atualiza instruções do bot sem precisar do WhatsApp."""
     secret = request.headers.get("X-Internal-Key", "")
-    if not secret or secret != os.getenv("FLASK_SECRET_KEY", ""):
+    valid = {os.getenv("FLASK_SECRET_KEY", ""), os.getenv("INTERNAL_API_KEY", "")} - {""}
+    if not secret or secret not in valid:
         return jsonify({"error": "unauthorized"}), 401
     data = request.json or {}
     text = data.get("text", "").strip()
