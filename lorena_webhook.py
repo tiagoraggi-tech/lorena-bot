@@ -626,32 +626,6 @@ def set_instruction_internal():
     return jsonify({"status": "ok", "cleared": cleared, "instruction_id": iid}), 200
 
 
-@app.route("/internal/api-explore", methods=["GET"])
-def api_explore():
-    """Endpoint temporário para explorar a API do consultorio.me."""
-    secret = request.headers.get("X-Internal-Key", "")
-    valid = {os.getenv("FLASK_SECRET_KEY", ""), os.getenv("INTERNAL_API_KEY", "")} - {""}
-    if not secret or secret not in valid:
-        return jsonify({"error": "unauthorized"}), 401
-    from consultorio_api import _get_token, BASE_URL, PRO_ID
-    import requests as req
-    token = _get_token()
-    if not token:
-        return jsonify({"error": "sem token"}), 500
-    path = request.args.get("path", f"/v1/api/appointment/reminders/{PRO_ID}")
-    try:
-        r = req.get(f"{BASE_URL}{path}",
-                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                    timeout=15)
-        try:
-            data = r.json()
-        except Exception:
-            data = r.text[:2000]
-        return jsonify({"status": r.status_code, "path": path, "data": data}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/test-llm", methods=["GET"])
 def test_llm():
     """Diagnóstico completo do Groq SDK."""

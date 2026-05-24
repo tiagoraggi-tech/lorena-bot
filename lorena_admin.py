@@ -23,7 +23,7 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
 
 DB_PATH = os.getenv("DB_PATH", "/data/lorena.db")
-JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "552499025732")
+JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "5524999025732")
 MAGIC_LINK_TTL_HOURS = 24
 
 
