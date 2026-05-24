@@ -49,7 +49,7 @@ def get_or_create_session(phone: str) -> dict:
                 UPDATE patient_sessions
                 SET current_state='NEW', collected_name=NULL, collected_phone=NULL,
                     collected_date=NULL, available_slots=NULL, current_slot_index=0,
-                    conversation_history=NULL
+                    conversation_history=NULL, is_retorno=0
                 WHERE patient_phone_hash=?
             """, (ph,))
             conn.commit()

@@ -304,9 +304,11 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             payload = json.loads(text.split("BUSCAR_PROXIMO:", 1)[1].strip())
             nome = payload.get("nome", "").strip()
             cpf = payload.get("cpf", "").strip()
+            is_retorno = bool(payload.get("retorno", False))
         except Exception:
             nome = session.get("collected_name", "")
             cpf = session.get("collected_document", "")
+            is_retorno = False
         telefone = phone  # sempre usa o WhatsApp de quem está conversando
         add_to_history(ph, "assistant", "Deixa eu verificar a próxima vaga disponível... 🔍")
         send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
@@ -317,7 +319,9 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             update_session(ph, current_state="AWAITING_CONFIRMATION",
                            collected_name=nome, collected_phone=telefone,
                            collected_document=cpf,
-                           collected_date=next_date, available_slots=next_slots, current_slot_index=0)
+                           collected_date=next_date, available_slots=next_slots,
+                           current_slot_index=0,
+                           is_retorno=1 if is_retorno else 0)
             return offer_slot(phone, ph)
         else:
             send_whatsapp_tracked(phone,
@@ -337,6 +341,7 @@ def handle_appointment_request(phone: str, ph: str, payload: dict):
     telefone = phone  # sempre usa o WhatsApp de quem está conversando
     cpf = payload.get("cpf", "").strip()
     data = payload.get("data", "").strip()
+    is_retorno = bool(payload.get("retorno", False))
 
     try:
         weekday = datetime.strptime(data, "%Y-%m-%d").weekday()
@@ -374,7 +379,9 @@ def handle_appointment_request(phone: str, ph: str, payload: dict):
     update_session(ph, current_state="AWAITING_CONFIRMATION",
                    collected_name=nome, collected_phone=telefone,
                    collected_document=cpf,
-                   collected_date=data, available_slots=slots, current_slot_index=0)
+                   collected_date=data, available_slots=slots,
+                   current_slot_index=0,
+                   is_retorno=1 if is_retorno else 0)
     return offer_slot(phone, ph)
 
 
@@ -459,13 +466,17 @@ def handle_slot_confirmation(phone: str, ph: str):
             date_label = dt_raw
             time_label = ""
         appt_id = result.get("appointment_id", "")
+        is_retorno = bool(session.get("is_retorno", 0))
+        retorno_line = "\n💚 *Consulta de retorno — gratuita!*" if is_retorno else ""
         send_whatsapp_tracked(phone,
             f"✅ Consulta confirmada!\n"
             f"📅 *{date_label}* às *{time_label}*\n"
-            f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR\n\n"
+            f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR"
+            f"{retorno_line}\n\n"
             f"Se precisar cancelar ou reagendar, é só me chamar! 😊")
         update_session(ph, current_state="NEW", available_slots=None,
-                       current_slot_index=0, last_appointment_id=appt_id)
+                       current_slot_index=0, last_appointment_id=appt_id,
+                       is_retorno=0)
         return jsonify({"status": "appointment_confirmed"}), 200
     else:
         err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
