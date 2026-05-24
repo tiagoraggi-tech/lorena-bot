@@ -61,6 +61,12 @@ app.add_url_rule(
     view_func=_wh.test_llm,
     methods=["GET"],
 )
+app.add_url_rule(
+    "/internal/set-instruction",
+    endpoint="set_instruction_internal",
+    view_func=_wh.set_instruction_internal,
+    methods=["POST"],
+)
 
 # ── Rotas do painel admin ──────────────────────────────────────────
 import lorena_admin as _adm
@@ -79,7 +85,4 @@ _admin_routes = [
 for path, endpoint, view_func, methods in _admin_routes:
     app.add_url_rule(path, endpoint=endpoint, view_func=view_func, methods=methods)
 
-# ── Dev ────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 6001))
-    app.run(host="0.0.0.0", port=port, debug=False)
+# ── Dev ──────────────────────────────────────────────
