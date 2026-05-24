@@ -593,6 +593,28 @@ def health():
     })
 
 
+@app.route("/internal/set-instruction", methods=["POST"])
+def set_instruction_internal():
+    """Endpoint interno protegido — atualiza instruções do bot sem precisar do WhatsApp."""
+    secret = request.headers.get("X-Internal-Key", "")
+    if not secret or secret != os.getenv("FLASK_SECRET_KEY", ""):
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    category = data.get("category", "GERAL")
+    clear_first = data.get("clear_first", True)
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    from lorena_instructions import add_instruction, clear_whatsapp_instructions
+    cleared = 0
+    if clear_first:
+        cleared = clear_whatsapp_instructions("internal")
+    iid = add_instruction(text, category, priority=10,
+                          created_by_phone="internal", created_via="whatsapp")
+    log.info("set_instruction_internal: cleared=%d, new_id=%d", cleared, iid)
+    return jsonify({"status": "ok", "cleared": cleared, "instruction_id": iid}), 200
+
+
 @app.route("/test-llm", methods=["GET"])
 def test_llm():
     """Diagnóstico completo do Groq SDK."""
