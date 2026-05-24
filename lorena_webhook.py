@@ -236,6 +236,12 @@ def handle_patient_message(phone: str, text: str):
         send_whatsapp_tracked(phone, "😊 Foi um prazer ajudar! Qualquer coisa, estou por aqui.")
         return jsonify({"status": "small_talk"}), 200
 
+    if intent == "CANCELAR_CONSULTA":
+        return handle_cancel_intent(phone, ph, session)
+
+    if intent == "REMARCAR_CONSULTA":
+        return handle_remarcar_intent(phone, ph, session)
+
     return process_with_llm(phone, ph, text, session)
 
 
@@ -453,12 +459,14 @@ def handle_slot_confirmation(phone: str, ph: str):
         except Exception:
             date_label = dt_raw
             time_label = ""
+        appt_id = result.get("appointment_id", "")
         send_whatsapp_tracked(phone,
             f"✅ Consulta confirmada!\n"
             f"📅 *{date_label}* às *{time_label}*\n"
             f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR\n\n"
             f"Se precisar cancelar ou reagendar, é só me chamar! 😊")
-        update_session(ph, current_state="NEW", available_slots=None, current_slot_index=0)
+        update_session(ph, current_state="NEW", available_slots=None,
+                       current_slot_index=0, last_appointment_id=appt_id)
         return jsonify({"status": "appointment_confirmed"}), 200
     else:
         err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
@@ -474,6 +482,37 @@ def offer_next_slot(phone: str, ph: str):
     new_idx = (session.get("current_slot_index", 0) or 0) + 1
     update_session(ph, current_slot_index=new_idx)
     return offer_slot(phone, ph)
+
+
+def handle_cancel_intent(phone: str, ph: str, session: dict):
+    """Paciente quer cancelar — usa o appointment_id salvo na sessão."""
+    appt_id = session.get("last_appointment_id", "")
+    nome = session.get("collected_name", "")
+    if not appt_id:
+        # Não temos ID salvo — encaminha para Jaqueline
+        return handoff_to_jaqueline(phone, ph, "cancel_no_id",
+                                    patient_name=nome,
+                                    subject="Paciente quer cancelar consulta (ID não encontrado na sessão)")
+    return handle_cancel(phone, ph, appt_id)
+
+
+def handle_remarcar_intent(phone: str, ph: str, session: dict):
+    """Paciente quer reagendar — cancela a consulta atual e inicia novo agendamento."""
+    appt_id = session.get("last_appointment_id", "")
+    nome = session.get("collected_name", "")
+    if appt_id and is_api_configured():
+        result = cancel_appointment(appt_id)
+        if isinstance(result, dict) and "error" in result:
+            log.warning("Remarcar: falha ao cancelar %s — %s", appt_id, result["error"])
+        else:
+            log.info("Remarcar: consulta %s cancelada antes de reagendar", appt_id)
+    # Limpa estado anterior e inicia novo fluxo de agendamento
+    update_session(ph, current_state="NEW", available_slots=None,
+                   current_slot_index=0, last_appointment_id=None)
+    send_whatsapp_tracked(phone,
+        "Certo! Vou cancelar a consulta anterior e agendar uma nova. 😊\n"
+        "Me confirma seu nome, telefone e CPF pra continuar?")
+    return jsonify({"status": "remarcar_started"}), 200
 
 
 def handle_cancel(phone: str, ph: str, appointment_id: str):

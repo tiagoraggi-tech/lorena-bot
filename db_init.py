@@ -143,6 +143,7 @@ def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     migrations = [
         "ALTER TABLE patient_sessions ADD COLUMN collected_document TEXT",
+        "ALTER TABLE patient_sessions ADD COLUMN last_appointment_id TEXT",
     ]
     for sql in migrations:
         try:
