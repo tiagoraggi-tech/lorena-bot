@@ -144,6 +144,7 @@ def migrate_db():
     migrations = [
         "ALTER TABLE patient_sessions ADD COLUMN collected_document TEXT",
         "ALTER TABLE patient_sessions ADD COLUMN last_appointment_id TEXT",
+        "ALTER TABLE patient_sessions ADD COLUMN last_appointment_datetime TEXT",
     ]
     for sql in migrations:
         try:
