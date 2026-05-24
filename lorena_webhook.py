@@ -38,7 +38,7 @@ app = Flask(__name__)
 
 # ===== Config =====
 LORENA_PHONE = os.getenv("LORENA_PHONE", "5524988370406")
-JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "552499025732")
+JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "5524999025732")
 TIAGO_PHONE = os.getenv("TIAGO_PHONE", "5521999249903")
 PRESCRIPTION_BOT_PHONE = os.getenv("PRESCRIPTION_BOT_PHONE", "5524936181108")
 EVOLUTION_URL = os.getenv("EVOLUTION_API_URL")
@@ -173,7 +173,7 @@ def messages_upsert():
             log.debug("fromMe=True ignorado (phone=*%s)", phone[-4:] if len(phone) >= 4 else phone)
             return jsonify({"status": "ignored_self"}), 200
 
-        # Comandos admin da Jaqueline (do número pessoal dela: 552499025732)
+        # Comandos admin da Jaqueline (do número pessoal dela: 5524999025732)
         # match pelos últimos 8 dígitos para tolerar variações de JID do WhatsApp
         if phone.endswith(JAQUELINE_PHONE[-8:]) or phone == JAQUELINE_PHONE:
             log.info("Mensagem da Jaqueline: %s", text[:60])

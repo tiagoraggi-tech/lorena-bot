@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger("lorena.instructions")
 DB_PATH = os.getenv("DB_PATH", "/data/lorena.db")
-JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "552499025732")
+JAQUELINE_PHONE = os.getenv("JAQUELINE_PHONE", "5524999025732")
 VALID_CATEGORIES = ["GERAL", "INICIAL", "PRECO", "PLANO", "HORARIO", "LOCALIZACAO", "OUTROS"]
 
 
