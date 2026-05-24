@@ -82,7 +82,7 @@ GROQ_MODELS = [
     os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
-    "gemma2-9b-it",
+    "llama-3.1-8b-instant",
 ]
 
 
