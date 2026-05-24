@@ -69,8 +69,8 @@ def add_instruction(text: str, category: str = "GERAL", priority: int = 5,
                     created_by_phone: str = "", created_via: str = "whatsapp") -> int:
     if len(text) < 5:
         raise ValueError("Instrução muito curta")
-    if len(text) > 1000:
-        raise ValueError("Instrução muito longa (max 1000)")
+    if len(text) > 5000:
+        raise ValueError("Instrução muito longa (max 5000)")
     if category not in VALID_CATEGORIES:
         category = "GERAL"
     if not (1 <= priority <= 10):
