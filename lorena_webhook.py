@@ -522,10 +522,20 @@ def handle_cancel(phone: str, ph: str, appointment_id: str):
                                     subject=f"Cancelar agendamento #{appointment_id}")
     result = cancel_appointment(appointment_id)
     if isinstance(result, dict) and "error" in result:
-        send_whatsapp_tracked(phone, f"Erro ao cancelar: {result['error']}")
-        return jsonify({"status": "cancel_error"}), 200
+        log.warning("Falha ao cancelar agendamento %s: %s", appointment_id, result["error"])
+        # Limpa o ID inválido/expirado da sessão e encaminha pra Jaqueline
+        update_session(ph, current_state="NEW", last_appointment_id=None)
+        session = get_session_by_hash(ph)
+        nome = session.get("collected_name", "")
+        send_whatsapp_tracked(phone,
+            "Não consegui cancelar automaticamente. "
+            "Vou pedir pra Jaqueline cuidar disso pra você! 😊")
+        return handoff_to_jaqueline(phone, ph, "cancel_api_error",
+                                    patient_name=nome,
+                                    subject=f"Erro ao cancelar agendamento #{appointment_id}: {result['error']}")
+    # Sucesso — limpa o ID para evitar tentativa de cancelar de novo
+    update_session(ph, current_state="NEW", last_appointment_id=None)
     send_whatsapp_tracked(phone, "✅ Agendamento cancelado com sucesso.\nSe precisar reagendar, é só me avisar!")
-    update_session(ph, current_state="NEW")
     return jsonify({"status": "cancelled"}), 200
 
 
