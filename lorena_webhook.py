@@ -490,11 +490,11 @@ def handle_slot_confirmation(phone: str, ph: str):
         return jsonify({"status": "appointment_confirmed"}), 200
     else:
         err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
-        log.error("handle_slot_confirmation falhou: %s", err)
+        log.warning("handle_slot_confirmation falhou (slot bloqueado?): %s", err)
         send_whatsapp_tracked(phone,
-            "Tive um problema técnico ao confirmar. Vou chamar a Jaqueline pra te ajudar! 😊")
-        return handoff_to_jaqueline(phone, ph, "api_error", patient_name=nome,
-                                    subject=f"Erro ao agendar {dt_raw} — {nome} ({telefone}): {err}")
+            "Infelizmente esse horário não está mais disponível. 😕\n"
+            "Vou verificar o próximo disponível para você!")
+        return offer_next_slot(phone, ph)
 
 
 def offer_next_slot(phone: str, ph: str):
