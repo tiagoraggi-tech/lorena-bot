@@ -144,6 +144,9 @@ def clear_whatsapp_instructions(by_phone: str) -> int:
 
 def parse_command(text: str) -> dict:
     text = text.strip()
+    # Tolerar prefixo '#' (ex: "#/ativar" → "/ativar")
+    if text.startswith("#"):
+        text = text[1:].strip()
     text_lower = text.lower()
 
     if text_lower in ("/parar", "/pare"):
@@ -191,7 +194,11 @@ def parse_command(text: str) -> dict:
 
 
 def handle_command(text: str, from_phone: str) -> str:
-    if from_phone != JAQUELINE_PHONE:
+    # Normalizar para tolerar "+" ou espaços no env var JAQUELINE_PHONE
+    _jaq = JAQUELINE_PHONE.strip().lstrip("+")
+    _from = from_phone.strip().lstrip("+")
+    if _from != _jaq:
+        log.warning("Comando rejeitado: from_phone=*%s JAQUELINE=*%s", from_phone[-4:], JAQUELINE_PHONE[-4:])
         return "⛔ Você não tem permissão pra executar comandos administrativos."
 
     parsed = parse_command(text)

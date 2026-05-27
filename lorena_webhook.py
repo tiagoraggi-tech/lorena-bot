@@ -167,6 +167,9 @@ def messages_upsert():
         # Normalizar phone: remover sufixos extras (grupos, broadcast etc)
         phone = phone.split("@")[0] if "@" in phone else phone
         phone = phone.replace("-", "").strip()
+        # Remover sufixo de dispositivo multi-device WhatsApp (ex: "5524999025732:4" → "5524999025732")
+        if ":" in phone:
+            phone = phone.split(":")[0]
 
         # fromMe=True: mensagem enviada PELO número da Lorena (chip do bot).
         # Ignoramos SEMPRE — seja resposta da API ou Jaqueline digitando no chip.
@@ -175,11 +178,14 @@ def messages_upsert():
             log.debug("fromMe=True ignorado (phone=*%s)", phone[-4:] if len(phone) >= 4 else phone)
             return jsonify({"status": "ignored_self"}), 200
 
-        # Comandos admin da Jaqueline (do número pessoal dela: 5524999025732)
-        # match pelos últimos 8 dígitos para tolerar variações de JID do WhatsApp
-        if phone.endswith(JAQUELINE_PHONE[-8:]) or phone == JAQUELINE_PHONE:
-            log.info("Mensagem da Jaqueline: %s", text[:60])
+        # Comandos admin da Jaqueline (do número pessoal dela: JAQUELINE_PHONE)
+        # Normalizar ambos os lados para tolerar variações de formato no env var
+        _jaq_norm = JAQUELINE_PHONE.strip().lstrip("+")
+        _is_jaqueline = phone == _jaq_norm or phone.endswith(_jaq_norm[-8:]) or _jaq_norm.endswith(phone[-8:])
+        if _is_jaqueline:
+            log.info("Mensagem da Jaqueline (phone=*%s texto='%s')", phone[-4:], text[:80])
             response = handle_command(text, phone)
+            log.info("Resposta para Jaqueline: %s", response[:80])
             send_whatsapp_tracked(JAQUELINE_PHONE, response)
             audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_command", "command": text[:100]})
             return jsonify({"status": "command_processed"}), 200
