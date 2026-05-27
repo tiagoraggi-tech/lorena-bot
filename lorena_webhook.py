@@ -7,6 +7,8 @@ import json
 import hashlib
 import logging
 import sqlite3
+import threading
+import time
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -487,14 +489,16 @@ def handle_slot_confirmation(phone: str, ph: str):
         update_session(ph, current_state="NEW", available_slots=None,
                        current_slot_index=0, last_appointment_id=appt_id,
                        is_retorno=0)
+        # Agenda lembrete 1 dia antes às 8h
+        schedule_reminder(phone, nome, dt_raw)
         return jsonify({"status": "appointment_confirmed"}), 200
     else:
         err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
-        log.error("handle_slot_confirmation falhou: %s", err)
+        log.warning("handle_slot_confirmation falhou (slot bloqueado?): %s", err)
         send_whatsapp_tracked(phone,
-            "Tive um problema técnico ao confirmar. Vou chamar a Jaqueline pra te ajudar! 😊")
-        return handoff_to_jaqueline(phone, ph, "api_error", patient_name=nome,
-                                    subject=f"Erro ao agendar {dt_raw} — {nome} ({telefone}): {err}")
+            "Infelizmente esse horário não está mais disponível. 😕\n"
+            "Vou verificar o próximo disponível para você!")
+        return offer_next_slot(phone, ph)
 
 
 def offer_next_slot(phone: str, ph: str):
@@ -669,6 +673,111 @@ def test_llm():
     return jsonify(result), 200 if ok else 500
 
 
+# ===== LEMBRETES DE CONSULTA =================================================
+
+def schedule_reminder(phone: str, name: str, appointment_dt_str: str):
+    """Salva lembrete no banco para ser enviado 1 dia antes às 8h (ou imediato se consulta hoje/amanhã cedo)."""
+    try:
+        appt_dt = datetime.fromisoformat(appointment_dt_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        # Lembrete = dia anterior às 8:00
+        reminder_dt = (appt_dt - timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+        now = datetime.now()
+        # Se o lembrete já passou, envia nas próximas 5 minutos
+        if reminder_dt < now:
+            reminder_dt = now + timedelta(minutes=5)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO appointment_reminders (patient_phone, patient_name, appointment_datetime, reminder_send_at) VALUES (?,?,?,?)",
+            (phone, name, appointment_dt_str, reminder_dt.isoformat())
+        )
+        conn.commit()
+        conn.close()
+        log.info("Lembrete agendado para %s em %s", phone[-4:], reminder_dt.strftime("%d/%m %H:%M"))
+    except Exception as e:
+        log.warning("Erro ao agendar lembrete: %s", e)
+
+
+def _build_reminder_msg(name: str, appointment_dt_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(appointment_dt_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        weekday_names = {0: "segunda-feira", 1: "terça-feira", 2: "quarta-feira",
+                         3: "quinta-feira", 4: "sexta-feira", 5: "sábado", 6: "domingo"}
+        weekday = weekday_names.get(dt.weekday(), "")
+        date_str = dt.strftime("%d/%m")
+        time_str = dt.strftime("%H:%M")
+        today = datetime.now().date()
+        if dt.date() == today:
+            when = f"hoje às *{time_str}*"
+        elif dt.date() == today + timedelta(days=1):
+            when = f"amanhã, *{weekday}* dia *{date_str}* às *{time_str}*"
+        else:
+            when = f"*{weekday}*, dia *{date_str}* às *{time_str}*"
+    except Exception:
+        when = appointment_dt_str
+    first = name.split()[0] if name else "Olá"
+    return (
+        f"Olá, {first}! 👋\n"
+        f"Lembrete: sua consulta com o Dr. Tiago é {when}.\n"
+        f"📍 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR\n\n"
+        f"Qualquer dúvida é só chamar! 😊"
+    )
+
+
+def check_and_send_reminders():
+    """Verifica lembretes pendentes e envia os que estão no prazo."""
+    try:
+        now = datetime.now().isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT id, patient_phone, patient_name, appointment_datetime FROM appointment_reminders "
+            "WHERE sent=0 AND reminder_send_at <= ?", (now,)
+        ).fetchall()
+        for row_id, phone, name, appt_dt in rows:
+            msg = _build_reminder_msg(name or "", appt_dt)
+            ok = send_whatsapp_raw(phone, msg)
+            sent_at = datetime.now().isoformat()
+            conn.execute("UPDATE appointment_reminders SET sent=1, sent_at=? WHERE id=?", (sent_at, row_id))
+            conn.commit()
+            log.info("Lembrete enviado para %s (ok=%s)", phone[-4:], ok)
+        conn.close()
+    except Exception as e:
+        log.warning("Erro em check_and_send_reminders: %s", e)
+
+
+def send_whatsapp_raw(phone: str, message: str) -> bool:
+    """Envia mensagem direta via Evolution API (sem rastrear duplicatas)."""
+    if not EVOLUTION_URL or not EVOLUTION_INSTANCE or not EVOLUTION_API_KEY:
+        return False
+    try:
+        url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+        r = requests.post(url, headers={"Content-Type": "application/json", "apikey": EVOLUTION_API_KEY},
+                          json={"number": phone, "text": message}, timeout=15)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log.error("send_whatsapp_raw falhou: %s", e)
+        return False
+
+
+def _reminder_worker():
+    """Thread de background: verifica lembretes a cada 30 minutos."""
+    log.info("Reminder worker iniciado.")
+    while True:
+        time.sleep(1800)  # 30 minutos
+        check_and_send_reminders()
+
+
+def start_reminder_thread():
+    t = threading.Thread(target=_reminder_worker, daemon=True, name="reminder-worker")
+    t.start()
+    log.info("Thread de lembretes iniciada.")
+
+
+# Inicia thread de lembretes ao carregar o módulo (gunicorn / Railway)
+start_reminder_thread()
+
+# =============================================================================
+
 if __name__ == "__main__":
     port = int(os.getenv("WEBHOOK_PORT", 6001))
     ngrok_token = os.getenv("NGROK_AUTHTOKEN")
@@ -683,4 +792,5 @@ if __name__ == "__main__":
     log.info("Bot status: %s", "ATIVO" if is_bot_active() else "PARADO")
     log.info("API consultorio.me: %s", "OK" if is_api_configured() else "NÃO CONFIGURADA")
     log.info("Instruções ativas: %d", len(list_active_instructions()))
+    start_reminder_thread()
     app.run(host="0.0.0.0", port=port, debug=False)

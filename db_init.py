@@ -135,6 +135,21 @@ CREATE TABLE IF NOT EXISTS magic_links (
     used INTEGER DEFAULT 0,
     used_at TEXT
 );
+
+-- ====================================================
+-- TABELA: appointment_reminders
+-- ====================================================
+CREATE TABLE IF NOT EXISTS appointment_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_phone TEXT NOT NULL,
+    patient_name TEXT,
+    appointment_datetime TEXT NOT NULL,
+    reminder_send_at TEXT NOT NULL,
+    sent INTEGER DEFAULT 0,
+    sent_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_pending ON appointment_reminders(sent, reminder_send_at);
 """
 
 
@@ -145,6 +160,18 @@ def migrate_db():
         "ALTER TABLE patient_sessions ADD COLUMN collected_document TEXT",
         "ALTER TABLE patient_sessions ADD COLUMN last_appointment_id TEXT",
         "ALTER TABLE patient_sessions ADD COLUMN is_retorno INTEGER DEFAULT 0",
+        # Tabela de lembretes (CREATE não precisa de ALTER, mas garantimos via executescript)
+        """CREATE TABLE IF NOT EXISTS appointment_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_phone TEXT NOT NULL,
+            patient_name TEXT,
+            appointment_datetime TEXT NOT NULL,
+            reminder_send_at TEXT NOT NULL,
+            sent INTEGER DEFAULT 0,
+            sent_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_reminders_pending ON appointment_reminders(sent, reminder_send_at)",
     ]
     for sql in migrations:
         try:
