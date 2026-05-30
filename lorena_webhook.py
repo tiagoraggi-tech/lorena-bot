@@ -202,10 +202,24 @@ def messages_upsert():
                 f"Pra dúvidas clínicas dos pacientes, use o Uriel ({PRESCRIPTION_BOT_PHONE}).")
             return jsonify({"status": "tiago_redirect"}), 200
 
-        # Bot pausado?
+        # Bot pausado? → encaminha para Jaqueline (handoff), não ignora silenciosamente
         if not is_bot_active():
-            log.info("Bot pausado — ignorando mensagem de *%s", phone[-4:])
-            return jsonify({"status": "bot_paused"}), 200
+            ph = hash_phone(phone)
+            session = get_or_create_session(phone)
+            state = session.get("current_state", "NEW")
+            if state == "HANDED_OFF":
+                # Já em handoff — só encaminha mensagem para Jaqueline sem avisar o paciente de novo
+                log.info("Bot pausado, sessão já em HANDED_OFF — encaminhando mensagem de *%s", phone[-4:])
+                send_whatsapp_tracked(JAQUELINE_PHONE,
+                    f"💬 *Mensagem de paciente (bot parado)*\n"
+                    f"📱 wa.me/{phone}\n"
+                    f"💬 {text[:300]}")
+                return jsonify({"status": "bot_paused_forwarded"}), 200
+            else:
+                # Primeira vez pausado — avisa o paciente e entra em handoff
+                log.info("Bot pausado — entrando em handoff para *%s", phone[-4:])
+                return handoff_to_jaqueline(phone, ph, "bot_paused",
+                                            subject="Bot parado — atendimento manual pela Jaqueline")
 
         return handle_patient_message(phone, text)
 
