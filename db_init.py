@@ -172,6 +172,14 @@ def migrate_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
         "CREATE INDEX IF NOT EXISTS idx_reminders_pending ON appointment_reminders(sent, reminder_send_at)",
+        "ALTER TABLE patient_sessions ADD COLUMN collected_price_info TEXT",
+        """CREATE TABLE IF NOT EXISTS supervisors (
+            phone TEXT PRIMARY KEY,
+            added_by TEXT,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            paused_until TEXT,
+            active INTEGER DEFAULT 1
+        )""",
     ]
     for sql in migrations:
         try:

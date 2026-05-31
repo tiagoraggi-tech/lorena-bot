@@ -193,12 +193,181 @@ def parse_command(text: str) -> dict:
     return {"action": "INVALID", "error": "Comando não reconhecido"}
 
 
+# ===== Supervisores dinâmicos =====
+
+def _norm(phone: str) -> str:
+    return phone.strip().lstrip("+")
+
+
+def is_supervisor(phone: str) -> bool:
+    """Retorna True se o número é supervisor ativo (tabela ou Jaqueline hardcoded)."""
+    p = _norm(phone)
+    # Jaqueline hardcoded como fallback
+    if p == _norm(JAQUELINE_PHONE):
+        return True
+    try:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT paused_until, active FROM supervisors WHERE phone=?", (p,)
+        ).fetchone()
+        conn.close()
+        if not row or not row[1]:
+            return False
+        paused_until = row[0]
+        if paused_until:
+            if paused_until == 'indefinido':
+                return False
+            try:
+                if datetime.utcnow() < datetime.fromisoformat(paused_until):
+                    return False
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def add_supervisor(phone: str, added_by: str) -> str:
+    p = _norm(phone)
+    try:
+        conn = _conn()
+        conn.execute("""
+            INSERT INTO supervisors (phone, added_by, active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(phone) DO UPDATE SET active=1, added_by=excluded.added_by,
+                added_at=CURRENT_TIMESTAMP, paused_until=NULL
+        """, (p, _norm(added_by)))
+        conn.commit()
+        conn.close()
+        return f"✅ Número *{p[-4:]}...{p[-4:]}* agora é supervisor do bot Lorena."
+    except Exception as e:
+        return f"❌ Erro ao incluir supervisor: {e}"
+
+
+def remove_supervisor(phone: str) -> str:
+    p = _norm(phone)
+    if p == _norm(JAQUELINE_PHONE):
+        return "⛔ Não é possível banir a supervisora principal."
+    try:
+        conn = _conn()
+        conn.execute("UPDATE supervisors SET active=0 WHERE phone=?", (p,))
+        conn.commit()
+        conn.close()
+        return f"🚫 Número *...{p[-4:]}* removido dos supervisores."
+    except Exception as e:
+        return f"❌ Erro ao banir: {e}"
+
+
+def pause_supervisor(phone: str) -> str:
+    p = _norm(phone)
+    if p == _norm(JAQUELINE_PHONE):
+        return "⛔ Não é possível pausar a supervisora principal."
+    try:
+        conn = _conn()
+        conn.execute("""
+            INSERT INTO supervisors (phone, added_by, paused_until, active)
+            VALUES (?, 'admin', 'indefinido', 1)
+            ON CONFLICT(phone) DO UPDATE SET paused_until='indefinido'
+        """, (p,))
+        conn.commit()
+        conn.close()
+        return f"⏸️ Número *...{p[-4:]}* pausado indefinidamente. Use /despausar {p} para reativar."
+    except Exception as e:
+        return f"❌ Erro ao pausar: {e}"
+
+
+def unpause_supervisor(phone: str) -> str:
+    p = _norm(phone)
+    try:
+        conn = _conn()
+        conn.execute("UPDATE supervisors SET paused_until=NULL WHERE phone=?", (p,))
+        conn.commit()
+        conn.close()
+        return f"▶️ Número *...{p[-4:]}* despausado. Comandos reativados."
+    except Exception as e:
+        return f"❌ Erro ao despausar: {e}"
+
+
+def handle_admin_command(text: str, from_phone: str) -> str:
+    """Comandos exclusivos do admin master (5521999249903)."""
+    t = text.strip()
+
+    # /incluir PHONE — adiciona supervisor
+    m = re.match(r'^/incluir\s+(\d+)', t, re.IGNORECASE)
+    if m:
+        return add_supervisor(m.group(1), from_phone)
+
+    # /banir PHONE — remove supervisor
+    m = re.match(r'^/banir\s+(\d+)', t, re.IGNORECASE)
+    if m:
+        return remove_supervisor(m.group(1))
+
+    # /parar PHONE — pausa recepção de comandos desse número indefinidamente
+    m = re.match(r'^/parar\s+(\d+)', t, re.IGNORECASE)
+    if m:
+        return pause_supervisor(m.group(1))
+
+    # /despausar PHONE — reativa comandos do número
+    m = re.match(r'^/despausar\s+(\d+)', t, re.IGNORECASE)
+    if m:
+        return unpause_supervisor(m.group(1))
+
+    # /supervisores — lista supervisores ativos
+    if t.lower() in ("/supervisores", "/listar_supervisores"):
+        try:
+            conn = _conn()
+            rows = conn.execute(
+                "SELECT phone, added_at, paused_until, active FROM supervisors ORDER BY added_at DESC"
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return f"📋 Apenas a supervisora padrão: *...{_norm(JAQUELINE_PHONE)[-4:]}*"
+            lines = [f"📋 *Supervisores cadastrados:*\n• (padrão) ...{_norm(JAQUELINE_PHONE)[-4:]}"]
+            for phone, added_at, paused_until, active in rows:
+                status = "✅" if active else "🚫"
+                if active and paused_until:
+                    try:
+                        if datetime.utcnow() < datetime.fromisoformat(paused_until):
+                            status = "⏸️"
+                    except Exception:
+                        pass
+                lines.append(f"• {status} ...{phone[-4:]} (desde {(added_at or '')[:10]})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ Erro: {e}"
+
+    # ver comandos / /help — lista todos os comandos disponíveis
+    if t.lower() in ("ver comandos", "/help", "/comandos", "/ajuda"):
+        return (
+            "🛡️ *Comandos do Admin Master*\n\n"
+            "*Supervisores:*\n"
+            "/incluir 55XXXXXXXXXX — adiciona supervisor\n"
+            "/banir 55XXXXXXXXXX — remove supervisor\n"
+            "/parar 55XXXXXXXXXX — pausa supervisor indefinidamente\n"
+            "/despausar 55XXXXXXXXXX — reativa supervisor\n"
+            "/supervisores — lista supervisores\n\n"
+            "*Bot:*\n"
+            "/parar — para o bot para todos os pacientes\n"
+            "/ativar — reativa o bot\n"
+            "/status — estado atual do bot\n\n"
+            "*Instruções:*\n"
+            "/instrucao [texto] — adiciona instrução ao bot\n"
+            "/instrucoes — lista instruções ativas\n"
+            "/instrucao_off N — desativa instrução #N\n"
+            "/limpar_instrucoes — remove instruções do WhatsApp\n\n"
+            "*Pacientes:*\n"
+            "/resetar 55XXXXXXXXXX — reseta sessão do paciente\n"
+            "/pausar 55XXXXXXXXXX — pausa bot para esse paciente"
+        )
+
+    # Admin também tem acesso a todos os comandos de supervisor
+    return handle_command(text, JAQUELINE_PHONE)  # processa como se fosse Jaqueline
+
+
 def handle_command(text: str, from_phone: str) -> str:
-    # Normalizar para tolerar "+" ou espaços no env var JAQUELINE_PHONE
-    _jaq = JAQUELINE_PHONE.strip().lstrip("+")
-    _from = from_phone.strip().lstrip("+")
-    if _from != _jaq:
-        log.warning("Comando rejeitado: from_phone=*%s JAQUELINE=*%s", from_phone[-4:], JAQUELINE_PHONE[-4:])
+    # Aceita Jaqueline hardcoded OU supervisores dinâmicos
+    if not is_supervisor(from_phone):
+        log.warning("Comando rejeitado: from_phone=*%s", from_phone[-4:])
         return "⛔ Você não tem permissão pra executar comandos administrativos."
 
     parsed = parse_command(text)

@@ -258,6 +258,88 @@ def find_next_available_slot(after_date: str = None, weeks_ahead: int = 8) -> di
     return {"error": "Nenhum horário disponível nas próximas semanas"}
 
 
+def find_next_two_slots(after_date: str = None, weeks_ahead: int = 8, preferred_weekday: str = None) -> list:
+    """
+    Faz UMA chamada à API e retorna até 2 dicts de dias diferentes.
+    Cada dict: {"date": "YYYY-MM-DD", "date_br": "...", "weekday": "...", "slots": [...]}
+    preferred_weekday: "segunda" ou "quarta" para filtrar apenas esse dia.
+    Retorna lista vazia se API falhar.
+    """
+    if not is_api_configured() or not PRO_ID:
+        return []
+
+    try:
+        start = (datetime.strptime(after_date, "%Y-%m-%d").date()
+                 if after_date else date.today())
+    except Exception:
+        start = date.today()
+
+    try:
+        r = requests.get(
+            f"{BASE_URL}/v1/api/appointment/available-times/{PRO_ID}",
+            headers=_auth_headers(),
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.error("find_next_two_slots: erro ao buscar slots: %s", e)
+        return []
+
+    all_slots = []
+    if isinstance(data, dict) and "Slots" in data:
+        all_slots = data["Slots"]
+    elif isinstance(data, list):
+        all_slots = data
+
+    from collections import defaultdict
+    slots_by_date = defaultdict(list)
+    for slot in all_slots:
+        if not isinstance(slot, dict):
+            continue
+        dt_raw = (slot.get("DateTime") or slot.get("dateTime") or
+                  slot.get("DataHora") or "")
+        if not dt_raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            slot_date = dt.date()
+        except Exception:
+            continue
+        slot_id = (slot.get("TimeSlotId") or slot.get("timeSlotId") or
+                   slot.get("id") or str(dt_raw))
+        slots_by_date[slot_date].append({"DateTime": dt_raw, "TimeSlotId": str(slot_id), "_raw": slot})
+
+    weekday_names = {0: "segunda-feira", 2: "quarta-feira"}
+    max_date = start + timedelta(weeks=weeks_ahead)
+    results = []
+
+    # Mapeamento de preferência de dia para número do dia da semana
+    day_map = {"segunda": 0, "segunda-feira": 0, "quarta": 2, "quarta-feira": 2}
+    preferred_wd = day_map.get((preferred_weekday or "").lower().strip())
+
+    # Se há preferência, filtra só esse dia; senão aceita segunda e quarta
+    allowed_weekdays = [preferred_wd] if preferred_wd is not None else [0, 2]
+
+    for slot_date in sorted(slots_by_date.keys()):
+        if slot_date <= start:
+            continue
+        if slot_date > max_date:
+            break
+        if slot_date.weekday() in allowed_weekdays:
+            results.append({
+                "date": slot_date.strftime("%Y-%m-%d"),
+                "date_br": slot_date.strftime("%d/%m/%Y"),
+                "weekday": weekday_names.get(slot_date.weekday(), ""),
+                "slots": slots_by_date[slot_date],
+            })
+            if len(results) == 2:
+                break
+
+    log.info("find_next_two_slots: %d dia(s) encontrado(s) (filtro=%s)", len(results), preferred_weekday)
+    return results
+
+
 def create_appointment(name: str, phone: str, date_time: str,
                        time_slot_id: str, birth_date: str = "",
                        document: str = "") -> dict:

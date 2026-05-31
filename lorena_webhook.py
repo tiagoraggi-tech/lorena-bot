@@ -27,9 +27,9 @@ from lorena_state import (
     get_session_by_hash, is_session_paused, pause_session,
 )
 from lorena_classifier import LorenaClassifier
-from lorena_instructions import is_bot_active, handle_command, list_active_instructions
+from lorena_instructions import is_bot_active, handle_command, handle_admin_command, is_supervisor, list_active_instructions
 from lorena_prompt import build_system_prompt
-from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured, find_next_available_slot
+from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured, find_next_available_slot, find_next_two_slots
 
 load_dotenv()
 migrate_db()  # garante coluna collected_document no banco existente
@@ -171,55 +171,43 @@ def messages_upsert():
         if ":" in phone:
             phone = phone.split(":")[0]
 
-        # fromMe=True: mensagem enviada PELO número da Lorena (chip do bot).
-        # Ignoramos SEMPRE — seja resposta da API ou Jaqueline digitando no chip.
-        # Comandos admin da Jaqueline chegam pelo número pessoal dela (JAQUELINE_PHONE) abaixo.
+        # fromMe=True: mensagem enviada PELO chip da Lorena/Jaqueline.
+        # Se o bot enviou → ignorar. Se foi Jaqueline digitando manualmente → pausar sessão do paciente.
         if key.get("fromMe"):
-            log.debug("fromMe=True ignorado (phone=*%s)", phone[-4:] if len(phone) >= 4 else phone)
+            if text and not is_message_from_bot(phone, text):
+                # Jaqueline entrou no diálogo manualmente → pausar bot para esse paciente
+                ph_manual = hash_phone(phone)
+                pause_until = (datetime.utcnow() + timedelta(minutes=15)).isoformat()
+                pause_session(ph_manual, pause_until)
+                log.info("Jaqueline entrou manualmente com *%s — sessão pausada por 2h", phone[-4:])
             return jsonify({"status": "ignored_self"}), 200
 
-        # Comandos admin da Jaqueline (do número pessoal dela: JAQUELINE_PHONE)
-        # Normalizar ambos os lados para tolerar variações de formato no env var
-        _jaq_norm = JAQUELINE_PHONE.strip().lstrip("+")
-        _is_jaqueline = phone == _jaq_norm or phone.endswith(_jaq_norm[-8:]) or _jaq_norm.endswith(phone[-8:])
-        if _is_jaqueline:
-            log.info("Mensagem da Jaqueline (phone=*%s texto='%s')", phone[-4:], text[:80])
+        # Supervisores (Jaqueline hardcoded + dinâmicos via /incluir)
+        if is_supervisor(phone):
+            log.info("Supervisor (phone=*%s texto='%s')", phone[-4:], text[:80])
             response = handle_command(text, phone)
-            log.info("Resposta para Jaqueline: %s", response[:80])
-            send_whatsapp_tracked(JAQUELINE_PHONE, response)
-            audit({"ts": datetime.utcnow().isoformat(), "event": "jaqueline_command", "command": text[:100]})
+            log.info("Resposta para supervisor: %s", response[:80])
+            send_whatsapp_tracked(phone, response)
+            audit({"ts": datetime.utcnow().isoformat(), "event": "supervisor_command",
+                   "phone": phone[-4:], "command": text[:100]})
             return jsonify({"status": "command_processed"}), 200
 
         # Ignorar mensagens de grupos, broadcasts e status
         if len(phone) > 15 or not phone.isdigit():
             return jsonify({"status": "ignored_non_individual"}), 200
 
-        # Mensagem do Dr. Tiago
-        if phone == TIAGO_PHONE or phone.endswith(TIAGO_PHONE[-8:]):
-            send_whatsapp_tracked(TIAGO_PHONE,
-                "Olá Dr. Tiago! Este é o bot Lorena (agendamento).\n"
-                "Pra comandos administrativos, use o número da Jaqueline.\n"
-                f"Pra dúvidas clínicas dos pacientes, use o Uriel ({PRESCRIPTION_BOT_PHONE}).")
-            return jsonify({"status": "tiago_redirect"}), 200
+        # Admin master — Dr. Tiago (acesso total + comandos exclusivos)
+        _tiago_norm = TIAGO_PHONE.strip().lstrip("+")
+        if phone == _tiago_norm or phone.endswith(_tiago_norm[-8:]):
+            log.info("Admin master (%s): %s", phone[-4:], text[:80])
+            response = handle_admin_command(text, phone)
+            send_whatsapp_tracked(TIAGO_PHONE, response)
+            return jsonify({"status": "admin_command_processed"}), 200
 
-        # Bot pausado? → encaminha para Jaqueline (handoff), não ignora silenciosamente
+        # Bot pausado?
         if not is_bot_active():
-            ph = hash_phone(phone)
-            session = get_or_create_session(phone)
-            state = session.get("current_state", "NEW")
-            if state == "HANDED_OFF":
-                # Já em handoff — só encaminha mensagem para Jaqueline sem avisar o paciente de novo
-                log.info("Bot pausado, sessão já em HANDED_OFF — encaminhando mensagem de *%s", phone[-4:])
-                send_whatsapp_tracked(JAQUELINE_PHONE,
-                    f"💬 *Mensagem de paciente (bot parado)*\n"
-                    f"📱 wa.me/{phone}\n"
-                    f"💬 {text[:300]}")
-                return jsonify({"status": "bot_paused_forwarded"}), 200
-            else:
-                # Primeira vez pausado — avisa o paciente e entra em handoff
-                log.info("Bot pausado — entrando em handoff para *%s", phone[-4:])
-                return handoff_to_jaqueline(phone, ph, "bot_paused",
-                                            subject="Bot parado — atendimento manual pela Jaqueline")
+            log.info("Bot pausado — ignorando mensagem de *%s", phone[-4:])
+            return jsonify({"status": "bot_paused"}), 200
 
         return handle_patient_message(phone, text)
 
@@ -239,6 +227,33 @@ def handle_patient_message(phone: str, text: str):
         return jsonify({"status": "no_text"}), 200
 
     add_to_history(ph, "user", text)
+
+    # Atalho direto para confirmação/rejeição de slot — não passa pelo LLM
+    if session.get("current_state") == "AWAITING_CONFIRMATION":
+        _t = text.lower().strip().rstrip("!.")
+        _confirm = {"sim", "s", "ok", "pode", "pode ser", "ótimo", "otimo",
+                    "confirmo", "confirmado", "quero", "esse", "esse mesmo",
+                    "1", "primeiro", "primeira", "opcao 1", "opção 1", "a primeira"}
+        _reject  = {"não", "nao", "n", "outro", "outro dia", "outra data",
+                    "2", "segundo", "segunda", "opcao 2", "opção 2", "a segunda"}
+        if _t in _confirm:
+            return handle_slot_confirmation(phone, ph)
+        if _t in _reject:
+            # Se há duas opções na sessão e o paciente escolheu a segunda
+            _slots = session.get("available_slots") or []
+            if len(_slots) >= 2:
+                from datetime import datetime as _dt
+                try:
+                    _da = _dt.fromisoformat(_slots[0]["DateTime"].replace("Z", "+00:00"))
+                    _db = _dt.fromisoformat(_slots[1]["DateTime"].replace("Z", "+00:00"))
+                    if _da.date() != _db.date():
+                        # "não" à primeira opção → confirma a segunda
+                        update_session(ph, current_slot_index=1)
+                        return handle_slot_confirmation(phone, ph)
+                except Exception:
+                    pass
+            return offer_next_slot(phone, ph)
+
     intent_result = _get_classifier().classify(text, session.get("current_state", "NEW"))
     intent = intent_result["intent"]
 
@@ -319,6 +334,15 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             return handoff_to_jaqueline(phone, ph, "bot_failure")
 
     if "CONFIRMAR_HORARIO" in text:
+        slot_index = 0
+        if "CONFIRMAR_HORARIO:" in text:
+            try:
+                payload = json.loads(text.split("CONFIRMAR_HORARIO:", 1)[1].strip())
+                opcao = int(payload.get("opcao", 1))
+                slot_index = max(0, opcao - 1)  # 1-based → 0-based
+            except Exception:
+                pass
+        update_session(ph, current_slot_index=slot_index)
         return handle_slot_confirmation(phone, ph)
 
     if "BUSCAR_PROXIMO:" in text:
@@ -327,28 +351,47 @@ def process_llm_response(phone: str, ph: str, raw: str, session: dict):
             nome = payload.get("nome", "").strip()
             cpf = payload.get("cpf", "").strip()
             is_retorno = bool(payload.get("retorno", False))
+            price_info = payload.get("valor", "").strip()
+            dia_preferido = payload.get("dia_preferido", "").strip().lower() or None
         except Exception:
             nome = session.get("collected_name", "")
             cpf = session.get("collected_document", "")
             is_retorno = False
-        telefone = phone  # sempre usa o WhatsApp de quem está conversando
-        add_to_history(ph, "assistant", "Deixa eu verificar a próxima vaga disponível... 🔍")
-        send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível... 🔍")
-        result = find_next_available_slot()
-        if isinstance(result, dict) and "slots" in result:
-            next_date = result["date"]
-            next_slots = result["slots"]
+            price_info = session.get("collected_price_info", "")
+            dia_preferido = None
+        telefone = phone
+        add_to_history(ph, "assistant", "Deixa eu verificar a próxima vaga disponível...")
+        send_whatsapp_tracked(phone, "Deixa eu verificar a próxima vaga disponível...")
+
+        # Bloco C: busca 2 dias distintos respeitando preferência de dia
+        two_days = find_next_two_slots(preferred_weekday=dia_preferido)
+        log.info("Bloco C: find_next_two_slots=%d dia(s) (pref=%s)", len(two_days), dia_preferido)
+
+        if two_days:
+            # Monta lista: 1 slot de cada dia
+            stored_slots = [d["slots"][0] for d in two_days if d.get("slots")]
+
+            # Se só veio 1 dia, busca o 2º dia manualmente
+            if len(stored_slots) < 2:
+                first_date = two_days[0]["date"]
+                second_day = find_next_available_slot(after_date=first_date)
+                if isinstance(second_day, dict) and "slots" in second_day:
+                    stored_slots.append(second_day["slots"][0])
+                    log.info("Bloco C: 2º dia buscado manualmente: %s", second_day["date"])
+
+            next_date = two_days[0]["date"]
             update_session(ph, current_state="AWAITING_CONFIRMATION",
                            collected_name=nome, collected_phone=telefone,
                            collected_document=cpf,
-                           collected_date=next_date, available_slots=next_slots,
+                           collected_price_info=price_info,
+                           collected_date=next_date, available_slots=stored_slots,
                            current_slot_index=0,
                            is_retorno=1 if is_retorno else 0)
             return offer_slot(phone, ph)
         else:
             send_whatsapp_tracked(phone,
                 "Não encontrei vagas disponíveis nos próximos dias. "
-                "Vou chamar a Jaqueline pra te ajudar! 😊")
+                "Vou chamar a Jaqueline pra te ajudar!")
             return handoff_to_jaqueline(phone, ph, "no_slots", patient_name=nome,
                                         subject="Sem vagas via busca automática")
         return jsonify({"status": "next_slot_searched"}), 200
@@ -412,6 +455,27 @@ def offer_slot(phone: str, ph: str):
     slots = session.get("available_slots") or []
     idx = session.get("current_slot_index", 0)
 
+    # Bloco C: apresenta dois horários em dias diferentes quando disponíveis
+    if idx == 0 and len(slots) >= 2:
+        try:
+            dt_a = datetime.fromisoformat(slots[0]["DateTime"].replace("Z", "+00:00"))
+            dt_b = datetime.fromisoformat(slots[1]["DateTime"].replace("Z", "+00:00"))
+            if dt_a.date() != dt_b.date():
+                weekday_short = {0: "segunda", 1: "terça", 2: "quarta",
+                                 3: "quinta", 4: "sexta", 5: "sábado", 6: "domingo"}
+                wd_a = weekday_short.get(dt_a.weekday(), "")
+                wd_b = weekday_short.get(dt_b.weekday(), "")
+                offer_msg = (
+                    f"Tenho horário na {wd_a} {dt_a.strftime('%d/%m')} às {dt_a.strftime('%H:%M')} "
+                    f"ou na {wd_b} {dt_b.strftime('%d/%m')} às {dt_b.strftime('%H:%M')}. Qual prefere?"
+                )
+                send_whatsapp_tracked(phone, offer_msg)
+                add_to_history(ph, "assistant", offer_msg)
+                update_session(ph, current_state="AWAITING_CONFIRMATION")
+                return jsonify({"status": "two_slots_offered"}), 200
+        except Exception as e:
+            log.warning("offer_slot: erro ao montar two-options, fallback p/ single: %s", e)
+
     if idx >= len(slots):
         # Slots do dia esgotados — busca automaticamente o próximo dia disponível
         session = get_session_by_hash(ph)
@@ -448,9 +512,8 @@ def offer_slot(phone: str, ph: str):
         date_str = ""
         weekday = ""
 
-    weekday_label = f"*{weekday}*, " if weekday else ""
-    offer_msg = (f"O próximo horário disponível é {weekday_label}*{date_str}* às *{time_str}*. 😊\n"
-                 f"Funciona pra você? (responda *sim* ou *não*)")
+    weekday_label = f"{weekday} " if weekday else ""
+    offer_msg = f"Tenho horário na {weekday_label}{date_str} às {time_str}. Pode ser?"
     send_whatsapp_tracked(phone, offer_msg)
     add_to_history(ph, "assistant", offer_msg)
     update_session(ph, current_state="AWAITING_CONFIRMATION")
@@ -489,6 +552,7 @@ def handle_slot_confirmation(phone: str, ph: str):
             time_label = ""
         appt_id = result.get("appointment_id", "")
         is_retorno = bool(session.get("is_retorno", 0))
+        price_info = session.get("collected_price_info", "") or ""
         tipo_label = "Retorno (gratuito)" if is_retorno else "Consulta regular"
         retorno_line = "\n💚 *Consulta de retorno — gratuita!*" if is_retorno else ""
         # Confirmacao para o paciente
@@ -498,13 +562,21 @@ def handle_slot_confirmation(phone: str, ph: str):
             f"🏥 Shopping 33, Torre 3, Sala 1502 — Vila Santa Cecília, VR"
             f"{retorno_line}\n\n"
             f"Se precisar cancelar ou reagendar, é só me chamar! 😊")
-        # Notificacao para a Jaqueline com tipo de consulta
+        # Valor para linha da notificação
+        if is_retorno:
+            valor_line = "💰 Valor: *Retorno gratuito*"
+        elif price_info:
+            valor_line = f"💰 Valor: *{price_info}*"
+        else:
+            valor_line = "💰 Valor: *a confirmar*"
+        # Notificacao para a Jaqueline com tipo e valor
         send_whatsapp_tracked(JAQUELINE_PHONE,
             f"📋 *Agendamento confirmado pelo bot*\n\n"
             f"👤 Paciente: *{nome}*\n"
             f"📅 Data/hora: *{date_label}* às *{time_label}*\n"
             f"🔖 Tipo: *{tipo_label}*\n"
-            f"📱 WhatsApp: wa.me/{phone}\n"
+            f"{valor_line}\n"
+            f"📱 WhatsApp: {phone}\n"
             f"🆔 ID: {appt_id}")
         update_session(ph, current_state="NEW", available_slots=None,
                        current_slot_index=0, last_appointment_id=appt_id,
@@ -608,8 +680,7 @@ def handoff_to_jaqueline(phone: str, ph: str, triggered_by: str,
     last4 = phone[-4:]
     notify_msg = (f"👋 *Novo encaminhamento para atendimento humano*\n\n"
                   f"👤 Nome: *{patient_name or 'não identificado'}*\n"
-                  f"📱 WhatsApp: *+{phone}*\n"
-                  f"🔗 wa.me/{phone}\n\n"
+                  f"📱 WhatsApp: *{phone}*\n\n"
                   f"📋 Motivo: {triggered_by}\n"
                   f"💬 Assunto: {subject or '—'}\n\n"
                   f"Responda pelo WhatsApp Web da Lorena ou entre em contato diretamente pelo link acima.")
@@ -625,6 +696,35 @@ def handoff_to_jaqueline(phone: str, ph: str, triggered_by: str,
     conn.close()
     update_session(ph, current_state="HANDED_OFF")
     return jsonify({"status": "handed_off"}), 200
+
+
+@app.route("/internal/reset-session", methods=["POST"])
+def reset_session():
+    """Limpa histórico e estado de sessão de um número. Protegido por INTERNAL_API_KEY."""
+    secret = request.headers.get("X-Internal-Key", "")
+    valid = {os.getenv("FLASK_SECRET_KEY", ""), os.getenv("INTERNAL_API_KEY", "")} - {""}
+    if not secret or secret not in valid:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.json or {}
+    phone = data.get("phone", "").strip().lstrip("+")
+    if not phone:
+        return jsonify({"error": "phone is required"}), 400
+    from lorena_state import hash_phone
+    ph = hash_phone(phone)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        UPDATE patient_sessions
+        SET current_state='NEW', collected_name=NULL, collected_phone=NULL,
+            collected_date=NULL, collected_document=NULL,
+            available_slots=NULL, current_slot_index=0,
+            conversation_history=NULL, is_retorno=0,
+            last_appointment_id=NULL, paused_until=NULL
+        WHERE patient_phone_hash=?
+    """, (ph,))
+    conn.commit()
+    conn.close()
+    log.info("reset_session: sessão de *%s resetada", phone[-4:])
+    return jsonify({"status": "ok", "phone_last4": phone[-4:]}), 200
 
 
 @app.route("/health", methods=["GET"])
