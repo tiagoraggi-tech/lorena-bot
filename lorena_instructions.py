@@ -160,6 +160,10 @@ def parse_command(text: str) -> dict:
     if text_lower in ("/help", "/ajuda", "ver comandos", "comandos"):
         return {"action": "HELP"}
 
+    m = re.match(r"^/rede\s+(.+)$", text, re.IGNORECASE)
+    if m:
+        return {"action": "REDE", "rede": m.group(1).strip()}
+
     m = re.match(r"^/resetar\s+(\d+)\s*$", text_lower)
     if m:
         return {"action": "RESETAR", "phone": m.group(1)}
@@ -357,11 +361,42 @@ def handle_admin_command(text: str, from_phone: str) -> str:
             "/limpar_instrucoes — remove instruções do WhatsApp\n\n"
             "*Pacientes:*\n"
             "/resetar 55XXXXXXXXXX — reseta sessão do paciente\n"
-            "/pausar 55XXXXXXXXXX — pausa bot para esse paciente"
+            "/pausar 55XXXXXXXXXX — pausa bot para esse paciente\n\n"
+            "*Consulta de rede:*\n"
+            "/rede [nome da rede] — verifica se rede Bradesco é aceita\n"
+            "Exemplo: /rede nacional top"
         )
 
     # Admin também tem acesso a todos os comandos de supervisor
     return handle_command(text, JAQUELINE_PHONE)  # processa como se fosse Jaqueline
+
+
+BRADESCO_REDES_ACEITAS = {r.strip().upper() for r in """
+AMS POLO - AMS NACIONAL, AMS POLO - NACIONAL, AZALEIA, CLINIC, ELETROPAULO I, ELETROPAULO II,
+EMBRAER EXCLUSIVO, EMBRAER NACIONAL, EMBRAER PLUS, EMBRAER SELECT, FLEURY, FLEURY I,
+FLEURY NACIONAL I, FLEURY NACIONAL II, FLEURY NACIONAL PLUS, IBM NACIONAL, IBM NACIONAL PLUS,
+INTEGRADA, INTEGRADA PLUS, KYNDRYL NACIONAL, KYNDRYL NACIONAL PLUS, MOINHOS DE VENTO,
+NACIONAL, NACIONAL ESPECIAL, NACIONAL I, NACIONAL II, NACIONAL III, NACIONAL PLUS,
+NACIONAL RN2P, NACIONAL SL, NACIONAL 25, NSN NACIONAL - NSN, NSN NACIONAL PLUS - NSN PLUS,
+ORQUIDEA, PERSONAL FUNC BR, PERSONAL FUNC BR+, PERSONAL FUNC RJ, PERSONAL FUNC RJ+,
+PERSONAL IX, PERSONAL V, PERSONAL VIII, PERSONAL X, PERSONAL XI, PERSONAL XIII,
+PERSONAL 21, PERSONAL 22, PERSONAL 23, PERSONAL 24, PERSONAL 500, PERSONAL 600, PERSONAL 700,
+PLENO 232, PREMIUM, REDE BRASKEM - NACIONAL I, REDE CSN INTERNACIONAL, REDE FIPECQ,
+REDE GLOBO INTERNACIONAL, REDE GLOBO NACIONAL, REDE IDEAL NAC, REDE INTERNACIONAL,
+REDE MUTUA, REDE NACIONAL CSN, REDE SCANIA, REDE VIVO NACIONAL, RSC NACIONAL,
+SANTANDER MASTER, SANTANDER TOP, SAUDE BRADESCO - NACIONAL, SCHULZ, SIEMENS NACIONAL,
+SIEMENS NACIONAL PLUS, SMS NC, SMS NP, TCS/BRASIL TELECOM NACIONAL, TULIPA,
+WHIRLPOOL NACIONAL, XEROX DO BRASIL
+""".split(",")}
+
+
+def check_rede_bradesco(rede: str) -> str:
+    """Verifica se a rede Bradesco é aceita no consultório."""
+    rede_upper = rede.strip().upper()
+    if rede_upper in BRADESCO_REDES_ACEITAS:
+        return f"✅ *{rede.strip()}* — rede aceita pelo consultório. Consulta cobrada pelo plano, sem custo para o paciente."
+    else:
+        return f"❌ *{rede.strip()}* — rede NÃO atendida pelo convênio aqui. Valor: R$ 280,00."
 
 
 def handle_command(text: str, from_phone: str) -> str:
@@ -434,6 +469,8 @@ def handle_command(text: str, from_phone: str) -> str:
         ok = deactivate_instruction(iid, from_phone)
         return (f"✅ Instrução #{iid} desativada." if ok
                 else f"⚠️ Instrução #{iid} não encontrada ou já desativada.")
+    if action == "REDE":
+        return check_rede_bradesco(parsed["rede"])
     if action == "RESETAR":
         patient_phone = parsed["phone"]
         try:
@@ -468,6 +505,9 @@ def handle_command(text: str, from_phone: str) -> str:
             "`/instrucao categoria=PRECO Consulta: R$ 250`\n\n"
             "🔄 *Sessão de paciente*\n"
             "• `/resetar 5524XXXXXXXX` — reseta sessão de um paciente\n\n"
+            "🔍 *Consulta de rede Bradesco*\n"
+            "• `/rede [nome da rede]` — verifica se rede é aceita no consultório\n"
+            "  Ex: `/rede nacional top`\n\n"
             "📋 *Ver lista de instruções ativas:* /instrucoes\n"
             "❓ *Ver esta ajuda:* ver comandos"
         )
