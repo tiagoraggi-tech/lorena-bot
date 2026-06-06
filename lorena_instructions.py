@@ -176,6 +176,10 @@ def parse_command(text: str) -> dict:
     if m:
         return {"action": "DEACTIVATE", "instruction_id": int(m.group(1))}
 
+    m = re.match(r"^/ver[_\s]instru[cç][aã]o\s+(\d+)\s*$", text_lower)
+    if m:
+        return {"action": "VIEW_INSTRUCTION", "instruction_id": int(m.group(1))}
+
     m = re.match(r"^/instru[cç][aã]o\s+(.+)$", text, re.IGNORECASE | re.DOTALL)
     if m:
         body = m.group(1).strip()
@@ -469,6 +473,24 @@ def handle_command(text: str, from_phone: str) -> str:
         ok = deactivate_instruction(iid, from_phone)
         return (f"✅ Instrução #{iid} desativada." if ok
                 else f"⚠️ Instrução #{iid} não encontrada ou já desativada.")
+
+    if action == "VIEW_INSTRUCTION":
+        iid = parsed["instruction_id"]
+        try:
+            conn = _conn()
+            row = conn.execute(
+                "SELECT id, category, priority, instruction_text, created_at FROM lorena_instructions WHERE id=? AND active=1",
+                (iid,)
+            ).fetchone()
+            conn.close()
+            if not row:
+                return f"⚠️ Instrução #{iid} não encontrada ou inativa."
+            return (f"📋 *Instrução #{row['id']}*\n"
+                    f"Categoria: {row['category']} | Prioridade: {row['priority']}\n"
+                    f"Criada: {(row['created_at'] or '')[:10]}\n\n"
+                    f"{row['instruction_text']}")
+        except Exception as e:
+            return f"❌ Erro: {e}"
     if action == "REDE":
         return check_rede_bradesco(parsed["rede"])
     if action == "RESETAR":
