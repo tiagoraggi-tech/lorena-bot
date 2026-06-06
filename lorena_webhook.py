@@ -172,14 +172,24 @@ def messages_upsert():
             phone = phone.split(":")[0]
 
         # fromMe=True: mensagem enviada PELO chip da Lorena/Jaqueline.
-        # Se o bot enviou → ignorar. Se foi Jaqueline digitando manualmente → pausar sessão do paciente.
+        # Jaqueline e o bot usam o mesmo aparelho — comandos "/" devem ser processados normalmente.
         if key.get("fromMe"):
+            if text and text.strip().startswith("/"):
+                # Jaqueline digitou um comando no aparelho compartilhado
+                log.info("Comando de Jaqueline (aparelho compartilhado): %s", text[:80])
+                try:
+                    response = handle_command(text.strip(), JAQUELINE_PHONE)
+                    log.info("Comando processado: %s", response[:80])
+                except Exception as e:
+                    log.exception("Erro ao processar comando fromMe: %s", e)
+                return jsonify({"status": "command_fromme_processed"}), 200
+
             if text and not is_message_from_bot(phone, text):
                 # Jaqueline entrou no diálogo manualmente → pausar bot para esse paciente
                 ph_manual = hash_phone(phone)
                 pause_until = (datetime.utcnow() + timedelta(minutes=15)).isoformat()
                 pause_session(ph_manual, pause_until)
-                log.info("Jaqueline entrou manualmente com *%s — sessão pausada por 2h", phone[-4:])
+                log.info("Jaqueline entrou manualmente com *%s — sessão pausada por 15min", phone[-4:])
             return jsonify({"status": "ignored_self"}), 200
 
         # Supervisores (Jaqueline hardcoded + dinâmicos via /incluir)
