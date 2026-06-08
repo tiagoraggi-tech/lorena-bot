@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS patient_sessions (
     paused_until TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    last_message_at TEXT
+    last_message_at TEXT,
+    confirm_failures INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON patient_sessions(current_state);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON patient_sessions(updated_at);
@@ -173,6 +174,7 @@ def migrate_db():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_reminders_pending ON appointment_reminders(sent, reminder_send_at)",
         "ALTER TABLE patient_sessions ADD COLUMN collected_price_info TEXT",
+        "ALTER TABLE patient_sessions ADD COLUMN confirm_failures INTEGER DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS supervisors (
             phone TEXT PRIMARY KEY,
             added_by TEXT,

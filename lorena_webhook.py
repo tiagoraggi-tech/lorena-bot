@@ -620,11 +620,28 @@ def handle_slot_confirmation(phone: str, ph: str):
         return jsonify({"status": "appointment_confirmed"}), 200
     else:
         err = result.get("error", "erro desconhecido") if isinstance(result, dict) else str(result)
-        log.warning("handle_slot_confirmation falhou (slot bloqueado?): %s", err)
-        send_whatsapp_tracked(phone,
-            "Infelizmente esse horário não está mais disponível. 😕\n"
-            "Vou verificar o próximo disponível para você!")
-        return offer_next_slot(phone, ph)
+        log.warning("handle_slot_confirmation falhou: %s | slot=%s dt=%s", err, slot_id, dt_raw)
+
+        # Conta falhas consecutivas na sessão
+        failures = (session.get("confirm_failures") or 0) + 1
+        update_session(ph, confirm_failures=failures)
+
+        if failures >= 2:
+            # Limite atingido — encaminha pra Jaqueline sem loop
+            log.warning("confirm_failures=%d — encaminhando para Jaqueline (%s)", failures, phone[-4:])
+            update_session(ph, current_state="NEW", available_slots=None,
+                           current_slot_index=0, confirm_failures=0)
+            send_whatsapp_tracked(phone,
+                "Não consegui confirmar o agendamento pelo sistema. 😕\n"
+                "A supervisora Jaqueline vai entrar em contato pra concluir seu agendamento!")
+            return handoff_to_jaqueline(phone, ph, "booking_api_error",
+                                        patient_name=nome,
+                                        subject=f"Falha ao confirmar slot ({err[:120]}) — {nome} ({phone})")
+        else:
+            send_whatsapp_tracked(phone,
+                "Infelizmente esse horário não está mais disponível. 😕\n"
+                "Vou verificar o próximo disponível para você!")
+            return offer_next_slot(phone, ph)
 
 
 def offer_next_slot(phone: str, ph: str):
