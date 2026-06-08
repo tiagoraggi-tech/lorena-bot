@@ -246,6 +246,30 @@ def handle_patient_message(phone: str, text: str):
                     "1", "primeiro", "primeira", "opcao 1", "opção 1", "a primeira"}
         _reject  = {"não", "nao", "n", "outro", "outro dia", "outra data",
                     "2", "segundo", "segunda", "opcao 2", "opção 2", "a segunda"}
+        # Fuzzy: "prefiro na quarta", "quarta", "segunda" → mapeia pelo dia do slot
+        if _t not in _confirm and _t not in _reject:
+            _day_map = {"segunda": 0, "terca": 1, "quarta": 2, "quinta": 3, "sexta": 4}
+            _slots2 = session.get("available_slots") or []
+            from datetime import datetime as _dtf
+            _matched = None
+            for _dw, _wn in _day_map.items():
+                if _dw in _t:
+                    for _si2, _sl2 in enumerate(_slots2[:2]):
+                        try:
+                            _sdt = _dtf.fromisoformat(_sl2["DateTime"].replace("Z", "+00:00"))
+                            if _sdt.weekday() == _wn:
+                                _matched = _si2
+                                break
+                        except Exception:
+                            pass
+                    if _matched is not None:
+                        break
+            if _matched is not None:
+                update_session(ph, current_slot_index=_matched)
+                return handle_slot_confirmation(phone, ph)
+            # Ainda em AWAITING_CONFIRMATION mas nao entendeu — re-oferece
+            return offer_slot(phone, ph)
+
         if _t in _confirm:
             return handle_slot_confirmation(phone, ph)
         if _t in _reject:
