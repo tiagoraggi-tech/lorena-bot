@@ -41,6 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_updated ON patient_sessions(updated_at);
 CREATE TABLE IF NOT EXISTS bot_status (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     is_active INTEGER DEFAULT 1,
+    is_dormindo INTEGER DEFAULT 0,
     last_changed_at TEXT DEFAULT CURRENT_TIMESTAMP,
     changed_by_phone TEXT,
     reason TEXT
@@ -175,6 +176,7 @@ def migrate_db():
         "CREATE INDEX IF NOT EXISTS idx_reminders_pending ON appointment_reminders(sent, reminder_send_at)",
         "ALTER TABLE patient_sessions ADD COLUMN collected_price_info TEXT",
         "ALTER TABLE patient_sessions ADD COLUMN confirm_failures INTEGER DEFAULT 0",
+        "ALTER TABLE bot_status ADD COLUMN is_dormindo INTEGER DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS supervisors (
             phone TEXT PRIMARY KEY,
             added_by TEXT,

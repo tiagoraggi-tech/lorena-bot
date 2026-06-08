@@ -27,7 +27,7 @@ from lorena_state import (
     get_session_by_hash, is_session_paused, pause_session,
 )
 from lorena_classifier import LorenaClassifier
-from lorena_instructions import is_bot_active, handle_command, handle_admin_command, is_supervisor, list_active_instructions
+from lorena_instructions import is_bot_active, is_dormindo, handle_command, handle_admin_command, is_supervisor, list_active_instructions
 from lorena_prompt import build_system_prompt
 from consultorio_api import get_available_times, create_appointment, cancel_appointment, is_api_configured, find_next_available_slot, find_next_two_slots
 
@@ -195,6 +195,11 @@ def messages_upsert():
         # Supervisores (Jaqueline hardcoded + dinâmicos via /incluir)
         if is_supervisor(phone):
             log.info("Supervisor (phone=*%s texto='%s')", phone[-4:], text[:80])
+            # /dormir e /acordar sempre processados; outros comandos silenciados em modo dormindo
+            _tl_sup = text.strip().lower()
+            if is_dormindo() and _tl_sup not in ("/dormir", "/silencio", "/silêncio", "/acordar", "/acorda"):
+                log.info("Modo dormindo — ignorando supervisor *%s", phone[-4:])
+                return jsonify({"status": "dormindo"}), 200
             response = handle_command(text, phone)
             log.info("Resposta para supervisor: %s", response[:80])
             send_whatsapp_tracked(phone, response)
@@ -210,6 +215,11 @@ def messages_upsert():
         _tiago_norm = TIAGO_PHONE.strip().lstrip("+")
         if phone == _tiago_norm or phone.endswith(_tiago_norm[-8:]):
             log.info("Admin master (%s): %s", phone[-4:], text[:80])
+            # /dormir e /acordar sempre processados; outros comandos silenciados em modo dormindo
+            _tl_adm = text.strip().lower()
+            if is_dormindo() and _tl_adm not in ("/dormir", "/silencio", "/silêncio", "/acordar", "/acorda"):
+                log.info("Modo dormindo — ignorando admin *%s", phone[-4:])
+                return jsonify({"status": "dormindo"}), 200
             response = handle_admin_command(text, phone)
             send_whatsapp_tracked(TIAGO_PHONE, response)
             return jsonify({"status": "admin_command_processed"}), 200

@@ -296,6 +296,32 @@ def unpause_supervisor(phone: str) -> str:
         return f"❌ Erro ao despausar: {e}"
 
 
+
+
+def is_dormindo() -> bool:
+    """Retorna True se o bot está em modo silencioso (dormindo)."""
+    try:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute("SELECT is_dormindo FROM bot_status WHERE id=1")
+        row = cur.fetchone()
+        conn.close()
+        return bool(row and row[0])
+    except Exception:
+        return False
+
+
+def set_dormindo(dormindo: bool) -> None:
+    """Ativa ou desativa o modo silencioso do bot."""
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE bot_status SET is_dormindo=? WHERE id=1",
+        (1 if dormindo else 0,)
+    )
+    conn.commit()
+    conn.close()
+
 def handle_admin_command(text: str, from_phone: str) -> str:
     """Comandos exclusivos do admin master (5521999249903)."""
     t = text.strip()
@@ -371,6 +397,16 @@ def handle_admin_command(text: str, from_phone: str) -> str:
             "Exemplo: /rede nacional top"
         )
 
+    # /dormir — modo silencioso: bot ignora Tiago e Jaqueline
+    if t.lower() in ("/dormir", "/silencio", "/silêncio"):
+        set_dormindo(True)
+        return "😴 Modo silencioso ativado. Não vou mais interagir com você ou Jaqueline até /acordar."
+
+    # /acordar — retoma interação com Tiago e Jaqueline
+    if t.lower() in ("/acordar", "/acorda"):
+        set_dormindo(False)
+        return "👋 Modo silencioso desativado. Voltei a interagir normalmente!"
+
     # Admin também tem acesso a todos os comandos de supervisor
     return handle_command(text, JAQUELINE_PHONE)  # processa como se fosse Jaqueline
 
@@ -405,6 +441,15 @@ def check_rede_bradesco(rede: str) -> str:
 
 def handle_command(text: str, from_phone: str) -> str:
     # Aceita Jaqueline hardcoded OU supervisores dinâmicos
+    # /dormir / /acordar — disponível para supervisores também
+    _tl = text.strip().lower()
+    if _tl in ("/dormir", "/silencio", "/silêncio"):
+        set_dormindo(True)
+        return "😴 Modo silencioso ativado. Bot não vai mais interagir com você ou Tiago até /acordar."
+    if _tl in ("/acordar", "/acorda"):
+        set_dormindo(False)
+        return "👋 Modo silencioso desativado. Voltei a interagir normalmente!"
+
     if not is_supervisor(from_phone):
         log.warning("Comando rejeitado: from_phone=*%s", from_phone[-4:])
         return "⛔ Você não tem permissão pra executar comandos administrativos."
